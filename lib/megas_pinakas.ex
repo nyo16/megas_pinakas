@@ -759,4 +759,162 @@ defmodule MegasPinakas do
   defp finalize_rows({rows, _current_row, _current_cells}) do
     Enum.reverse(rows)
   end
+
+  # ===========================================================================
+  # Row Data Helper Functions
+  # ===========================================================================
+
+  @doc """
+  Converts a BigTable row to a simple nested map.
+
+  Returns a map with the structure:
+  `%{family => %{qualifier => value}}` where value is the most recent cell value.
+
+  ## Examples
+
+      iex> {:ok, row} = MegasPinakas.read_row(project, instance, table, "user#123")
+      iex> MegasPinakas.row_to_map(row)
+      %{"cf" => %{"name" => "John Doe", "email" => "john@example.com"}}
+
+  """
+  @spec row_to_map(Row.t()) :: map()
+  def row_to_map(%Row{families: families}) do
+    Map.new(families, fn %{name: family_name, columns: columns} ->
+      column_map =
+        Map.new(columns, fn %{qualifier: qualifier, cells: cells} ->
+          # Get the most recent cell value (first cell, as they're sorted by timestamp desc)
+          value =
+            case cells do
+              [%{value: v} | _] -> v
+              [] -> nil
+            end
+
+          {qualifier, value}
+        end)
+
+      {family_name, column_map}
+    end)
+  end
+
+  def row_to_map(nil), do: %{}
+
+  @doc """
+  Gets a single cell value from a row by family and qualifier.
+
+  Returns the most recent value for the cell, or `nil` if not found.
+
+  ## Examples
+
+      iex> {:ok, row} = MegasPinakas.read_row(project, instance, table, "user#123")
+      iex> MegasPinakas.get_cell(row, "cf", "name")
+      "John Doe"
+
+  """
+  @spec get_cell(Row.t() | nil, String.t(), String.t()) :: binary() | nil
+  def get_cell(%Row{families: families}, family, qualifier) do
+    with %{columns: columns} <- Enum.find(families, &(&1.name == family)),
+         %{cells: [%{value: value} | _]} <- Enum.find(columns, &(&1.qualifier == qualifier)) do
+      value
+    else
+      _ -> nil
+    end
+  end
+
+  def get_cell(nil, _family, _qualifier), do: nil
+
+  @doc """
+  Gets all cell versions for a column, including timestamps.
+
+  Returns a list of `%{value: binary(), timestamp: integer()}` maps,
+  sorted by timestamp descending (most recent first).
+
+  ## Examples
+
+      iex> {:ok, row} = MegasPinakas.read_row(project, instance, table, "user#123")
+      iex> MegasPinakas.get_cells(row, "cf", "name")
+      [%{value: "John Doe", timestamp: 1765323352546000}]
+
+  """
+  @spec get_cells(Row.t() | nil, String.t(), String.t()) :: [map()]
+  def get_cells(%Row{families: families}, family, qualifier) do
+    with %{columns: columns} <- Enum.find(families, &(&1.name == family)),
+         %{cells: cells} <- Enum.find(columns, &(&1.qualifier == qualifier)) do
+      Enum.map(cells, fn %{value: value, timestamp_micros: ts} ->
+        %{value: value, timestamp: ts}
+      end)
+    else
+      _ -> []
+    end
+  end
+
+  def get_cells(nil, _family, _qualifier), do: []
+
+  @doc """
+  Gets all columns in a family as a map.
+
+  Returns `%{qualifier => value}` for the most recent values.
+
+  ## Examples
+
+      iex> {:ok, row} = MegasPinakas.read_row(project, instance, table, "user#123")
+      iex> MegasPinakas.get_family(row, "cf")
+      %{"name" => "John Doe", "email" => "john@example.com"}
+
+  """
+  @spec get_family(Row.t() | nil, String.t()) :: map()
+  def get_family(%Row{families: families}, family) do
+    case Enum.find(families, &(&1.name == family)) do
+      %{columns: columns} ->
+        Map.new(columns, fn %{qualifier: qualifier, cells: cells} ->
+          value =
+            case cells do
+              [%{value: v} | _] -> v
+              [] -> nil
+            end
+
+          {qualifier, value}
+        end)
+
+      nil ->
+        %{}
+    end
+  end
+
+  def get_family(nil, _family), do: %{}
+
+  @doc """
+  Gets the row key from a row.
+
+  ## Examples
+
+      iex> {:ok, row} = MegasPinakas.read_row(project, instance, table, "user#123")
+      iex> MegasPinakas.row_key(row)
+      "user#123"
+
+  """
+  @spec row_key(Row.t() | nil) :: binary() | nil
+  def row_key(%Row{key: key}), do: key
+  def row_key(nil), do: nil
+
+  @doc """
+  Converts multiple rows to a list of maps.
+
+  Each row becomes `%{key: row_key, data: %{family => %{qualifier => value}}}`.
+
+  ## Examples
+
+      iex> {:ok, rows} = MegasPinakas.read_rows(project, instance, table, rows: row_set)
+      iex> MegasPinakas.rows_to_list(rows)
+      [
+        %{key: "user#1", data: %{"cf" => %{"name" => "Alice"}}},
+        %{key: "user#2", data: %{"cf" => %{"name" => "Bob"}}}
+      ]
+
+  """
+  @spec rows_to_list([Row.t()]) :: [map()]
+  def rows_to_list(rows) when is_list(rows) do
+    Enum.map(rows, fn row ->
+      %{key: row_key(row), data: row_to_map(row)}
+    end)
+  end
 end
