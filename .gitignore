@@ -10,7 +10,7 @@
 # Where third-party dependencies like ExDoc output generated docs.
 /doc/
 
-# Temporary files, for example, from tests.
+# Temporary files, for example, from tests.:
 /tmp/
 
 # If the VM crashes, it generates a dump, let's ignore it too.
@@ -21,4 +21,15 @@ erl_crash.dump
 
 # Ignore package tarball (built via "mix hex.build").
 megas_pinakas-*.tar
+
+/_build
+/cover
+/deps
+/doc
+/.fetch
+erl_crash.dump
+*.ez
+*.beam
+/config/*.secret.exs
+.elixir_ls/
 
