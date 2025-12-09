@@ -686,7 +686,7 @@ defmodule MegasPinakas do
   defp process_read_rows_chunk(_, acc), do: acc
 
   defp process_chunk(chunk, {rows, current_row, current_cells}) do
-    # Simplified chunk processing - in production you'd want more complete logic
+    # Build cell data from chunk
     new_cells =
       if chunk.value do
         [
@@ -703,12 +703,21 @@ defmodule MegasPinakas do
         current_cells
       end
 
-    if chunk.commit_row do
-      row = build_row(chunk.row_key || (current_row && current_row.key), new_cells)
-      {[row | rows], nil, []}
-    else
-      new_row = %{key: chunk.row_key || (current_row && current_row.key)}
-      {rows, new_row, new_cells}
+    # row_status is a oneof field: {:commit_row, true} | {:reset_row, true} | nil
+    case chunk.row_status do
+      {:commit_row, true} ->
+        row_key = chunk.row_key || (current_row && current_row.key)
+        row = build_row(row_key, new_cells)
+        {[row | rows], nil, []}
+
+      {:reset_row, true} ->
+        # Reset current row, discard accumulated cells
+        {rows, nil, []}
+
+      _ ->
+        # Continue accumulating cells for current row
+        new_row = %{key: chunk.row_key || (current_row && current_row.key)}
+        {rows, new_row, new_cells}
     end
   end
 
