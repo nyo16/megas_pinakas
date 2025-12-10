@@ -546,6 +546,96 @@ defmodule MegasPinakas do
     }
   end
 
+  @doc """
+  Creates a row range with both keys exclusive (open).
+
+  ## Examples
+
+      MegasPinakas.row_range_open("user#100", "user#200")
+  """
+  @spec row_range_open(binary(), binary()) :: RowRange.t()
+  def row_range_open(start_key, end_key) do
+    %RowRange{
+      start_key: {:start_key_open, start_key},
+      end_key: {:end_key_open, end_key}
+    }
+  end
+
+  @doc """
+  Creates a row range with both keys inclusive (closed).
+
+  ## Examples
+
+      MegasPinakas.row_range_closed("user#100", "user#200")
+  """
+  @spec row_range_closed(binary(), binary()) :: RowRange.t()
+  def row_range_closed(start_key, end_key) do
+    %RowRange{
+      start_key: {:start_key_closed, start_key},
+      end_key: {:end_key_closed, end_key}
+    }
+  end
+
+  @doc """
+  Creates a row range with open start and closed end.
+
+  ## Examples
+
+      MegasPinakas.row_range_open_closed("user#100", "user#200")
+  """
+  @spec row_range_open_closed(binary(), binary()) :: RowRange.t()
+  def row_range_open_closed(start_key, end_key) do
+    %RowRange{
+      start_key: {:start_key_open, start_key},
+      end_key: {:end_key_closed, end_key}
+    }
+  end
+
+  @doc """
+  Creates a row range from start_key to the end of the table.
+
+  ## Examples
+
+      MegasPinakas.row_range_from("user#500")
+  """
+  @spec row_range_from(binary()) :: RowRange.t()
+  def row_range_from(start_key) do
+    %RowRange{
+      start_key: {:start_key_closed, start_key},
+      end_key: nil
+    }
+  end
+
+  @doc """
+  Creates a row range from the beginning of the table to end_key.
+
+  ## Examples
+
+      MegasPinakas.row_range_until("user#500")
+  """
+  @spec row_range_until(binary()) :: RowRange.t()
+  def row_range_until(end_key) do
+    %RowRange{
+      start_key: nil,
+      end_key: {:end_key_open, end_key}
+    }
+  end
+
+  @doc """
+  Creates an unbounded row range (all rows).
+
+  ## Examples
+
+      MegasPinakas.row_range_unbounded()
+  """
+  @spec row_range_unbounded() :: RowRange.t()
+  def row_range_unbounded do
+    %RowRange{
+      start_key: nil,
+      end_key: nil
+    }
+  end
+
   # ============================================================================
   # Filter Builders
   # ============================================================================

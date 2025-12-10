@@ -114,6 +114,54 @@ defmodule MegasPinakasTest do
       # Should increment the previous byte
       assert range.end_key == {:end_key_open, <<98>>}
     end
+
+    test "row_range_open/2 creates a row range with both keys exclusive" do
+      range = MegasPinakas.row_range_open("start", "end")
+
+      assert %RowRange{} = range
+      assert range.start_key == {:start_key_open, "start"}
+      assert range.end_key == {:end_key_open, "end"}
+    end
+
+    test "row_range_closed/2 creates a row range with both keys inclusive" do
+      range = MegasPinakas.row_range_closed("start", "end")
+
+      assert %RowRange{} = range
+      assert range.start_key == {:start_key_closed, "start"}
+      assert range.end_key == {:end_key_closed, "end"}
+    end
+
+    test "row_range_open_closed/2 creates a row range with open start and closed end" do
+      range = MegasPinakas.row_range_open_closed("start", "end")
+
+      assert %RowRange{} = range
+      assert range.start_key == {:start_key_open, "start"}
+      assert range.end_key == {:end_key_closed, "end"}
+    end
+
+    test "row_range_from/1 creates a row range from start key to end of table" do
+      range = MegasPinakas.row_range_from("user#500")
+
+      assert %RowRange{} = range
+      assert range.start_key == {:start_key_closed, "user#500"}
+      assert range.end_key == nil
+    end
+
+    test "row_range_until/1 creates a row range from beginning of table to end key" do
+      range = MegasPinakas.row_range_until("user#500")
+
+      assert %RowRange{} = range
+      assert range.start_key == nil
+      assert range.end_key == {:end_key_open, "user#500"}
+    end
+
+    test "row_range_unbounded/0 creates an unbounded row range" do
+      range = MegasPinakas.row_range_unbounded()
+
+      assert %RowRange{} = range
+      assert range.start_key == nil
+      assert range.end_key == nil
+    end
   end
 
   describe "filter builders" do
