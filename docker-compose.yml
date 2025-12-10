@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  bigtable-emulator:
+    image: google/cloud-sdk:latest
+    ports:
+      - "8086:8086"
+    command: >
+      gcloud beta emulators bigtable start
+      --host-port=0.0.0.0:8086
+    environment:
+      - CLOUDSDK_CORE_DISABLE_PROMPTS=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Example development container for your Elixir app
+  app:
+    build: .
+    depends_on:
+      - bigtable-emulator
+    environment:
+      - BIGTABLE_EMULATOR_HOST=bigtable-emulator:8086
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: iex -S mix
+    profiles:
+      - dev
