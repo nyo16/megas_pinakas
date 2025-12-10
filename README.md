@@ -220,19 +220,111 @@ filter = MegasPinakas.interleave_filters([
 # Specific row keys
 row_set = MegasPinakas.row_set(["row1", "row2", "row3"])
 
-# Row range
+# Row range (default: start inclusive, end exclusive)
 range = MegasPinakas.row_range("user#100", "user#200")
 row_set = MegasPinakas.row_set_from_ranges([range])
 
-# Prefix scan
-range = MegasPinakas.row_range_prefix("user#123#")
-
 # Various range types
-range = MegasPinakas.row_range_open("a", "z")       # Both exclusive
-range = MegasPinakas.row_range_closed("a", "z")    # Both inclusive
-range = MegasPinakas.row_range_from("user#500")    # From key to end
-range = MegasPinakas.row_range_until("user#500")   # From start to key
-range = MegasPinakas.row_range_unbounded()         # All rows
+range = MegasPinakas.row_range_open("a", "z")       # Both exclusive: (a, z)
+range = MegasPinakas.row_range_closed("a", "z")    # Both inclusive: [a, z]
+range = MegasPinakas.row_range_open_closed("a", "z") # Start exclusive, end inclusive: (a, z]
+range = MegasPinakas.row_range_from("user#500")    # From key to end: [user#500, ∞)
+range = MegasPinakas.row_range_until("user#500")   # From start to key: [∅, user#500)
+range = MegasPinakas.row_range_unbounded()         # All rows: [∅, ∞)
+```
+
+### Prefix Scans
+
+Prefix scans efficiently retrieve all rows starting with a given prefix:
+
+```elixir
+# All users (rows starting with "user#")
+range = MegasPinakas.row_range_prefix("user#")
+# Internally creates range: ["user#", "user$") where $ is next char after #
+
+# All posts for a specific user
+range = MegasPinakas.row_range_prefix("user#123#posts#")
+# Matches: user#123#posts#001, user#123#posts#002, etc.
+
+# Combine with read_rows
+{:ok, rows} = MegasPinakas.read_rows(project, instance, "table",
+  rows: MegasPinakas.row_set_from_ranges([MegasPinakas.row_range_prefix("user#")]),
+  rows_limit: 100
+)
+```
+
+### Start and End Keys with Inclusive/Exclusive Bounds
+
+Understanding inclusive vs exclusive bounds is crucial for pagination and range queries:
+
+```elixir
+# INCLUSIVE start, EXCLUSIVE end (default): [start, end)
+# Use when: Standard range queries, initial page loads
+range = MegasPinakas.row_range("user#100", "user#200")
+# Includes: user#100, user#101, ..., user#199
+# Excludes: user#200
+
+# EXCLUSIVE start, EXCLUSIVE end: (start, end)
+# Use when: Paginating after a known key
+range = MegasPinakas.row_range_open("user#100", "user#200")
+# Excludes: user#100 and user#200
+# Includes: user#101, ..., user#199
+
+# INCLUSIVE start, INCLUSIVE end: [start, end]
+# Use when: You want both boundary keys included
+range = MegasPinakas.row_range_closed("user#100", "user#200")
+# Includes: user#100, user#101, ..., user#199, user#200
+
+# EXCLUSIVE start, INCLUSIVE end: (start, end]
+# Use when: Paginating backwards or specific boundary needs
+range = MegasPinakas.row_range_open_closed("user#100", "user#200")
+# Excludes: user#100
+# Includes: user#101, ..., user#200
+```
+
+### Pagination Example
+
+```elixir
+# First page - start from beginning
+first_page_range = MegasPinakas.row_range_prefix("user#")
+{:ok, rows} = MegasPinakas.read_rows(project, instance, "users",
+  rows: MegasPinakas.row_set_from_ranges([first_page_range]),
+  rows_limit: 100
+)
+
+# Get last key from results
+last_key = rows |> List.last() |> MegasPinakas.row_key()
+# => "user#099"
+
+# Next page - use EXCLUSIVE start to skip the last seen key
+next_page_range = MegasPinakas.row_range_open(last_key, "user#" <> <<255>>)
+# Or use the simpler approach with open start:
+next_page_range = %Google.Bigtable.V2.RowRange{
+  start_key: {:start_key_open, last_key},
+  end_key: {:end_key_open, "user#" <> <<255>>}
+}
+
+{:ok, next_rows} = MegasPinakas.read_rows(project, instance, "users",
+  rows: MegasPinakas.row_set_from_ranges([next_page_range]),
+  rows_limit: 100
+)
+```
+
+### Combining Prefix with Bounds
+
+```elixir
+# All user posts from a specific date range (using composite keys)
+# Key format: user#<user_id>#posts#<timestamp>
+
+# Posts for user 123 from 2024-01 only
+start_key = "user#123#posts#2024-01-01"
+end_key = "user#123#posts#2024-02-01"
+range = MegasPinakas.row_range(start_key, end_key)  # [start, end)
+
+# Posts for user 123 AFTER a specific post (for pagination)
+last_seen_post = "user#123#posts#2024-01-15T10:30:00"
+range = MegasPinakas.row_range_open(last_seen_post, "user#123#posts#" <> <<255>>)
+# Excludes the last_seen_post, includes everything after until end of prefix
 ```
 
 ## Type-Aware Operations
@@ -378,11 +470,43 @@ end
 
 ## Time Series
 
-Time-series data with reverse timestamp ordering:
+Time-series data with reverse timestamp ordering for efficient recent-first queries.
+
+### Reverse Timestamp Ordering
+
+BigTable sorts row keys lexicographically. To get recent data first (without scanning the entire table),
+we use **reverse timestamps**: `max_timestamp - actual_timestamp`.
+
+```
+Normal timestamp:    2024-01-01 → "1704067200"  (sorts first, oldest)
+                     2024-12-31 → "1735689599"  (sorts last, newest)
+
+Reverse timestamp:   2024-01-01 → "8295932799"  (sorts last)
+                     2024-12-31 → "8264310400"  (sorts first, newest!)
+```
+
+Row key format: `<metric_id>#<reverse_timestamp>`
+
+This means a prefix scan like `row_range_prefix("cpu:server1#")` returns the most recent data first.
 
 ```elixir
 alias MegasPinakas.TimeSeries
 
+# Build reverse timestamp row keys manually
+row_key = TimeSeries.time_series_row_key("cpu:server1", ~U[2024-01-15 10:00:00Z])
+# => "cpu:server1#8296..."
+
+# Convert timestamps
+reverse_ts = TimeSeries.reverse_timestamp(~U[2024-01-15 10:00:00Z])
+{:ok, original_dt} = TimeSeries.from_reverse_timestamp(reverse_ts)
+
+# Parse row keys
+{:ok, %{metric_id: id, timestamp: ts}} = TimeSeries.parse_row_key(row_key)
+```
+
+### Writing Data Points
+
+```elixir
 # Write a data point
 TimeSeries.write_point(project, instance, "metrics", "cpu:server1",
   %{value: 0.85, tags: %{host: "srv1", region: "us-east"}})
@@ -392,8 +516,12 @@ TimeSeries.write_points(project, instance, "metrics", [
   %{metric_id: "cpu:server1", value: 0.85, timestamp: ~U[2024-01-15 10:00:00Z]},
   %{metric_id: "cpu:server2", value: 0.92, timestamp: ~U[2024-01-15 10:00:00Z]}
 ])
+```
 
-# Query recent points
+### Querying Data
+
+```elixir
+# Query recent points (most recent first due to reverse timestamps)
 {:ok, points} = TimeSeries.query_recent(project, instance, "metrics", "cpu:server1", limit: 100)
 
 # Query time range
