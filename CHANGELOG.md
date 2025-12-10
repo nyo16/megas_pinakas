@@ -86,4 +86,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for BigTable emulator and production (via Goth)
 - Configurable pool size and timeouts
 
-[0.5.0]: https://github.com/niko-1/megas_pinakas/releases/tag/v0.5.0
+[0.5.0]: https://github.com/nyo16/megas_pinakas/releases/tag/v0.5.0
