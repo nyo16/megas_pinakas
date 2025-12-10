@@ -312,7 +312,7 @@ defmodule MegasPinakas.Streaming do
             row_range = MegasPinakas.row_range_from(last_key <> <<0>>)
             Keyword.put(opts, :rows, MegasPinakas.row_set_from_ranges([row_range]))
 
-          %Google.Bigtable.V2.RowSet{row_ranges: ranges} when length(ranges) > 0 ->
+          %Google.Bigtable.V2.RowSet{row_ranges: [_ | _] = ranges} ->
             # Update first range to start after last_key
             [first_range | rest] = ranges
 

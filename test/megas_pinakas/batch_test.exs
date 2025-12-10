@@ -3,7 +3,6 @@ defmodule MegasPinakas.BatchTest do
 
   alias MegasPinakas.Batch
   alias MegasPinakas.Row
-  alias Google.Bigtable.V2.Mutation
 
   describe "new/0" do
     test "creates an empty batch" do
