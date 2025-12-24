@@ -163,6 +163,56 @@ modifications = [
 {:ok, _} = Admin.delete_table("project", "instance", "my-table")
 ```
 
+### Garbage Collection Rules
+
+Column families support GC rules to automatically delete old data:
+
+```elixir
+alias MegasPinakas.Admin
+
+# Keep only the N most recent versions
+gc_rule = Admin.max_versions_gc_rule(3)
+
+# Delete cells older than N seconds (TTL)
+gc_rule = Admin.max_age_gc_rule(86400)  # 24 hours
+
+# Intersection (AND) - all conditions must be met to GC
+# Keep 3 versions AND data must be older than 7 days to be deleted
+gc_rule = Admin.intersection_gc_rule([
+  Admin.max_versions_gc_rule(3),
+  Admin.max_age_gc_rule(604800)
+])
+
+# Union (OR) - any condition triggers GC
+# Delete if more than 1000 versions OR older than 30 days
+gc_rule = Admin.union_gc_rule([
+  Admin.max_versions_gc_rule(1000),
+  Admin.max_age_gc_rule(2592000)
+])
+```
+
+Apply GC rules when creating or modifying column families:
+
+```elixir
+# At table creation
+{:ok, table} = Admin.create_table("project", "instance", "table",
+  column_families: %{
+    "cf" => %{gc_rule: Admin.max_versions_gc_rule(1)}
+  })
+
+# Add column family with GC rule to existing table
+modifications = [
+  Admin.create_column_family("new_cf", Admin.max_versions_gc_rule(3))
+]
+{:ok, _} = Admin.modify_column_families("project", "instance", "table", modifications)
+
+# Update GC rule on existing column family
+modifications = [
+  Admin.update_column_family("cf", Admin.max_age_gc_rule(86400))
+]
+{:ok, _} = Admin.modify_column_families("project", "instance", "table", modifications)
+```
+
 ### Instance Administration
 
 ```elixir
