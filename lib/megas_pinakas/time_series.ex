@@ -30,8 +30,8 @@ defmodule MegasPinakas.TimeSeries do
   """
 
   alias MegasPinakas
-  alias MegasPinakas.Types
   alias MegasPinakas.Row
+  alias MegasPinakas.Types
 
   # Max timestamp for reverse ordering (year 2286 in microseconds)
   @max_timestamp 9_999_999_999_999_999
@@ -201,7 +201,15 @@ defmodule MegasPinakas.TimeSeries do
         ~U[2024-01-01 00:00:00Z], ~U[2024-01-02 00:00:00Z]
       )
   """
-  @spec query_range(String.t(), String.t(), String.t(), String.t(), DateTime.t(), DateTime.t(), keyword()) ::
+  @spec query_range(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          DateTime.t(),
+          DateTime.t(),
+          keyword()
+        ) ::
           {:ok, [map()]} | {:error, term()}
   def query_range(project, instance, table, metric_id, start_time, end_time, opts \\ []) do
     family = Keyword.get(opts, :family, @default_family)

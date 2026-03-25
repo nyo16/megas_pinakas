@@ -158,14 +158,14 @@ defmodule MegasPinakas.BatchTest do
       batch =
         Batch.new()
         |> Batch.add(
-             Row.new("r1")
-             |> Row.put_string("cf", "c1", "v1")
-             |> Row.put_string("cf", "c2", "v2")
-           )
+          Row.new("r1")
+          |> Row.put_string("cf", "c1", "v1")
+          |> Row.put_string("cf", "c2", "v2")
+        )
         |> Batch.add(
-             Row.new("r2")
-             |> Row.put_string("cf", "c1", "v1")
-           )
+          Row.new("r2")
+          |> Row.put_string("cf", "c1", "v1")
+        )
 
       assert Batch.mutation_count(batch) == 3
     end

@@ -9,8 +9,8 @@ defmodule MegasPinakas.InstanceAdmin do
   alias MegasPinakas.{Auth, Client, Config}
 
   alias Google.Bigtable.Admin.V2.{
-    BigtableInstanceAdmin.Stub,
     AppProfile,
+    BigtableInstanceAdmin.Stub,
     Cluster,
     CreateAppProfileRequest,
     CreateClusterRequest,
@@ -399,23 +399,8 @@ defmodule MegasPinakas.InstanceAdmin do
           {:ok, AppProfile.t()} | {:error, term()}
   def create_app_profile(project_id, instance_id, app_profile_id, opts \\ []) do
     operation = fn channel ->
-      routing_policy =
-        cond do
-          Keyword.get(opts, :multi_cluster_routing) ->
-            {:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}}
-
-          single_cluster = Keyword.get(opts, :single_cluster_routing) ->
-            {:single_cluster_routing,
-             %AppProfile.SingleClusterRouting{
-               cluster_id: single_cluster[:cluster_id] || single_cluster["cluster_id"],
-               allow_transactional_writes:
-                 single_cluster[:allow_transactional_writes] ||
-                   single_cluster["allow_transactional_writes"] || false
-             }}
-
-          true ->
-            {:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}}
-        end
+      default_routing = {:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}}
+      routing_policy = build_routing_policy(opts, default_routing)
 
       app_profile = %AppProfile{
         description: Keyword.get(opts, :description, ""),
@@ -509,23 +494,7 @@ defmodule MegasPinakas.InstanceAdmin do
           {:ok, Google.Longrunning.Operation.t()} | {:error, term()}
   def update_app_profile(project_id, instance_id, app_profile_id, opts \\ []) do
     operation = fn channel ->
-      routing_policy =
-        cond do
-          Keyword.get(opts, :multi_cluster_routing) ->
-            {:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}}
-
-          single_cluster = Keyword.get(opts, :single_cluster_routing) ->
-            {:single_cluster_routing,
-             %AppProfile.SingleClusterRouting{
-               cluster_id: single_cluster[:cluster_id] || single_cluster["cluster_id"],
-               allow_transactional_writes:
-                 single_cluster[:allow_transactional_writes] ||
-                   single_cluster["allow_transactional_writes"] || false
-             }}
-
-          true ->
-            nil
-        end
+      routing_policy = build_routing_policy(opts, nil)
 
       app_profile = %AppProfile{
         name: Config.app_profile_path(project_id, instance_id, app_profile_id),
@@ -603,6 +572,25 @@ defmodule MegasPinakas.InstanceAdmin do
 
       true ->
         paths
+    end
+  end
+
+  defp build_routing_policy(opts, default) do
+    cond do
+      Keyword.get(opts, :multi_cluster_routing) ->
+        {:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}}
+
+      single_cluster = Keyword.get(opts, :single_cluster_routing) ->
+        {:single_cluster_routing,
+         %AppProfile.SingleClusterRouting{
+           cluster_id: single_cluster[:cluster_id] || single_cluster["cluster_id"],
+           allow_transactional_writes:
+             single_cluster[:allow_transactional_writes] ||
+               single_cluster["allow_transactional_writes"] || false
+         }}
+
+      true ->
+        default
     end
   end
 end

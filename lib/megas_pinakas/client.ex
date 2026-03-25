@@ -4,7 +4,12 @@ defmodule MegasPinakas.Client do
 
   This module wraps the GrpcConnectionPool to provide a simple interface
   for executing operations with automatic connection management.
+
+  All gRPC responses are normalized through `MegasPinakas.Response.format/1`,
+  converting raw gRPC errors into idiomatic `{:error, {status_atom, message}}` tuples.
   """
+
+  alias MegasPinakas.Response
 
   @default_pool MegasPinakas.ConnectionPool
 
@@ -30,18 +35,45 @@ defmodule MegasPinakas.Client do
   @spec execute((GRPC.Channel.t() -> any()), keyword()) :: {:ok, any()} | {:error, term()}
   def execute(operation_fn, opts \\ []) when is_function(operation_fn, 1) do
     pool_name = Keyword.get(opts, :pool, @default_pool)
+    start_time = System.monotonic_time()
+    metadata = %{pool: pool_name}
+
+    :telemetry.execute(
+      [:megas_pinakas, :request, :start],
+      %{system_time: System.system_time()},
+      metadata
+    )
 
     case GrpcConnectionPool.get_channel(pool_name) do
       {:ok, channel} ->
         try do
-          result = operation_fn.(channel)
-          {:ok, result}
+          result = operation_fn.(channel) |> Response.format()
+          duration = System.monotonic_time() - start_time
+          :telemetry.execute([:megas_pinakas, :request, :stop], %{duration: duration}, metadata)
+          result
         rescue
-          e -> {:error, {:execution_error, e}}
+          e ->
+            duration = System.monotonic_time() - start_time
+
+            :telemetry.execute(
+              [:megas_pinakas, :request, :exception],
+              %{duration: duration},
+              Map.put(metadata, :reason, Exception.message(e))
+            )
+
+            {:error, {:execution_error, Exception.message(e)}}
         end
 
       {:error, reason} ->
-        {:error, reason}
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:megas_pinakas, :request, :exception],
+          %{duration: duration},
+          Map.put(metadata, :reason, reason)
+        )
+
+        {:error, {:pool_error, reason}}
     end
   end
 
@@ -91,12 +123,4 @@ defmodule MegasPinakas.Client do
   """
   @spec default_pool() :: atom()
   def default_pool, do: @default_pool
-
-  @doc """
-  Alias for `execute/2` for backward compatibility.
-  """
-  @spec with_connection((GRPC.Channel.t() -> any()), keyword()) :: {:ok, any()} | {:error, term()}
-  def with_connection(fun, opts \\ []) when is_function(fun, 1) do
-    execute(fun, opts)
-  end
 end

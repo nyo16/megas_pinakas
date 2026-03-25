@@ -62,7 +62,15 @@ defmodule MegasPinakas.CounterTTL do
         bucket: :minute
       )
   """
-  @spec increment(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec increment(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, integer()} | {:error, term()}
   def increment(project, instance, table, key, family, qualifier, opts \\ []) do
     amount = Keyword.get(opts, :amount, 1)
@@ -95,7 +103,15 @@ defmodule MegasPinakas.CounterTTL do
         bucket: :minute
       )
   """
-  @spec get_current(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec get_current(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, integer() | nil} | {:error, term()}
   def get_current(project, instance, table, key, family, qualifier, opts \\ []) do
     bucket = Keyword.get(opts, :bucket, :minute)
@@ -121,7 +137,15 @@ defmodule MegasPinakas.CounterTTL do
         bucket: :minute, window_size: 5
       )
   """
-  @spec get_window(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec get_window(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, integer()} | {:error, term()}
   def get_window(project, instance, table, key, family, qualifier, opts \\ []) do
     bucket = Keyword.get(opts, :bucket, :minute)
@@ -145,16 +169,7 @@ defmodule MegasPinakas.CounterTTL do
       {:ok, rows} ->
         total =
           Enum.reduce(rows, 0, fn row, acc ->
-            case MegasPinakas.get_cell(row, family, qualifier) do
-              nil ->
-                acc
-
-              value ->
-                case Types.decode(:integer, value) do
-                  {:ok, v} -> acc + v
-                  {:error, _} -> acc
-                end
-            end
+            acc + sum_counter_from_row(row, family, qualifier)
           end)
 
         {:ok, total}
@@ -236,9 +251,17 @@ defmodule MegasPinakas.CounterTTL do
           IO.puts("Rate limited")
       end
   """
-  @spec increment_with_limit(String.t(), String.t(), String.t(), String.t(), pos_integer(), keyword()) ::
+  @spec increment_with_limit(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          pos_integer(),
+          keyword()
+        ) ::
           {:ok, integer()} | {:error, :rate_limited, DateTime.t()} | {:error, term()}
-  def increment_with_limit(project, instance, table, key, limit, opts \\ []) when is_integer(limit) do
+  def increment_with_limit(project, instance, table, key, limit, opts \\ [])
+      when is_integer(limit) do
     bucket = Keyword.get(opts, :bucket, :minute)
     family = Keyword.get(opts, :family, @default_family)
     qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
@@ -275,7 +298,7 @@ defmodule MegasPinakas.CounterTTL do
       MegasPinakas.CounterTTL.build_row_key("user#123", :minute)
       # => "user#123#1704067200"
   """
-  @spec build_row_key(String.t(), atom(), integer()) :: String.t()
+  @spec build_row_key(String.t(), atom(), integer() | nil) :: String.t()
   def build_row_key(key, bucket, timestamp \\ nil) do
     ts = timestamp || System.system_time(:second)
     bucket_seconds = bucket_to_seconds(bucket)
@@ -317,7 +340,7 @@ defmodule MegasPinakas.CounterTTL do
   def bucket_to_seconds(:second), do: 1
   def bucket_to_seconds(:minute), do: 60
   def bucket_to_seconds(:hour), do: 3600
-  def bucket_to_seconds(:day), do: 86400
+  def bucket_to_seconds(:day), do: 86_400
   def bucket_to_seconds(:week), do: 604_800
 
   # ============================================================================
@@ -336,6 +359,19 @@ defmodule MegasPinakas.CounterTTL do
           Types.decode(:integer, value)
         else
           {:ok, nil}
+        end
+    end
+  end
+
+  defp sum_counter_from_row(row, family, qualifier) do
+    case MegasPinakas.get_cell(row, family, qualifier) do
+      nil ->
+        0
+
+      value ->
+        case Types.decode(:integer, value) do
+          {:ok, v} -> v
+          {:error, _} -> 0
         end
     end
   end

@@ -9,8 +9,8 @@ defmodule MegasPinakas.Admin do
   alias MegasPinakas.{Auth, Client, Config}
 
   alias Google.Bigtable.Admin.V2.{
-    BigtableTableAdmin.Stub,
     Backup,
+    BigtableTableAdmin.Stub,
     ColumnFamily,
     CreateBackupRequest,
     CreateTableRequest,

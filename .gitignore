@@ -33,3 +33,7 @@ erl_crash.dump
 /config/*.secret.exs
 .elixir_ls/
 
+# Dialyzer PLT files
+/priv/plts/*.plt
+/priv/plts/*.plt.hash
+

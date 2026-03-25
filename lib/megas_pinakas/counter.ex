@@ -55,7 +55,16 @@ defmodule MegasPinakas.Counter do
         project, instance, "counters", "row1", "cf", "views", 5
       )
   """
-  @spec increment(String.t(), String.t(), String.t(), binary(), String.t(), String.t(), integer(), keyword()) ::
+  @spec increment(
+          String.t(),
+          String.t(),
+          String.t(),
+          binary(),
+          String.t(),
+          String.t(),
+          integer(),
+          keyword()
+        ) ::
           {:ok, integer()} | {:error, term()}
   def increment(project, instance, table, row_key, family, qualifier, amount \\ 1, opts \\ [])
       when is_integer(amount) do
@@ -85,7 +94,16 @@ defmodule MegasPinakas.Counter do
         project, instance, "counters", "row1", "cf", "stock", 5
       )
   """
-  @spec decrement(String.t(), String.t(), String.t(), binary(), String.t(), String.t(), integer(), keyword()) ::
+  @spec decrement(
+          String.t(),
+          String.t(),
+          String.t(),
+          binary(),
+          String.t(),
+          String.t(),
+          integer(),
+          keyword()
+        ) ::
           {:ok, integer()} | {:error, term()}
   def decrement(project, instance, table, row_key, family, qualifier, amount \\ 1, opts \\ [])
       when is_integer(amount) do
@@ -120,7 +138,16 @@ defmodule MegasPinakas.Counter do
         project, instance, "counters", "row1", "cf", "views", 100
       )
   """
-  @spec set(String.t(), String.t(), String.t(), binary(), String.t(), String.t(), integer(), keyword()) ::
+  @spec set(
+          String.t(),
+          String.t(),
+          String.t(),
+          binary(),
+          String.t(),
+          String.t(),
+          integer(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
   def set(project, instance, table, row_key, family, qualifier, value, opts \\ [])
       when is_integer(value) do
@@ -162,7 +189,14 @@ defmodule MegasPinakas.Counter do
       )
       # => {:ok, %{"stats:page_views" => 42, "stats:clicks" => 15, "engagement:time_spent" => 3600}}
   """
-  @spec increment_many(String.t(), String.t(), String.t(), binary(), [{String.t(), String.t(), integer()}], keyword()) ::
+  @spec increment_many(
+          String.t(),
+          String.t(),
+          String.t(),
+          binary(),
+          [{String.t(), String.t(), integer()}],
+          keyword()
+        ) ::
           {:ok, map()} | {:error, term()}
   def increment_many(project, instance, table, row_key, counters, opts \\ [])
       when is_list(counters) do
@@ -198,9 +232,27 @@ defmodule MegasPinakas.Counter do
         project, instance, "counters", "row1", "cf", "views", 1
       )
   """
-  @spec increment_if_exists(String.t(), String.t(), String.t(), binary(), String.t(), String.t(), integer(), keyword()) ::
+  @spec increment_if_exists(
+          String.t(),
+          String.t(),
+          String.t(),
+          binary(),
+          String.t(),
+          String.t(),
+          integer(),
+          keyword()
+        ) ::
           {:ok, :applied | :not_applied} | {:error, term()}
-  def increment_if_exists(project, instance, table, row_key, family, qualifier, amount \\ 1, opts \\ [])
+  def increment_if_exists(
+        project,
+        instance,
+        table,
+        row_key,
+        family,
+        qualifier,
+        amount \\ 1,
+        opts \\ []
+      )
       when is_integer(amount) do
     # Use pass_all_filter to check if any cells exist
     predicate = MegasPinakas.pass_all_filter()
@@ -249,7 +301,8 @@ defmodule MegasPinakas.Counter do
             |> MegasPinakas.Counter.add_counter("cf", "clicks", 0)
             |> MegasPinakas.Row.write(project, instance, "counters")
   """
-  @spec add_counter(MegasPinakas.Row.t(), String.t(), String.t(), integer()) :: MegasPinakas.Row.t()
+  @spec add_counter(MegasPinakas.Row.t(), String.t(), String.t(), integer()) ::
+          MegasPinakas.Row.t()
   def add_counter(row, family, qualifier, initial_value \\ 0) when is_integer(initial_value) do
     MegasPinakas.Row.put_integer(row, family, qualifier, initial_value)
   end
@@ -261,7 +314,8 @@ defmodule MegasPinakas.Counter do
 
       rule = MegasPinakas.Counter.increment_rule("cf", "views", 1)
   """
-  @spec increment_rule(String.t(), String.t(), integer()) :: Google.Bigtable.V2.ReadModifyWriteRule.t()
+  @spec increment_rule(String.t(), String.t(), integer()) ::
+          Google.Bigtable.V2.ReadModifyWriteRule.t()
   def increment_rule(family, qualifier, amount) when is_integer(amount) do
     MegasPinakas.increment_rule(family, qualifier, amount)
   end
@@ -296,21 +350,19 @@ defmodule MegasPinakas.Counter do
           Enum.reduce(counters, %{}, fn {family, qualifier, _amount}, acc ->
             key = "#{family}:#{qualifier}"
             value = MegasPinakas.get_cell(row, family, qualifier)
-
-            decoded =
-              if value do
-                case Types.decode(:integer, value) do
-                  {:ok, v} -> v
-                  {:error, _} -> nil
-                end
-              else
-                nil
-              end
-
-            Map.put(acc, key, decoded)
+            Map.put(acc, key, decode_integer_value(value))
           end)
 
         {:ok, results}
+    end
+  end
+
+  defp decode_integer_value(nil), do: nil
+
+  defp decode_integer_value(value) do
+    case Types.decode(:integer, value) do
+      {:ok, v} -> v
+      {:error, _} -> nil
     end
   end
 end

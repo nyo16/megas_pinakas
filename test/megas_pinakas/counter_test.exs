@@ -1,9 +1,9 @@
 defmodule MegasPinakas.CounterTest do
   use ExUnit.Case, async: true
 
+  alias Google.Bigtable.V2.ReadModifyWriteRule
   alias MegasPinakas.Counter
   alias MegasPinakas.Row
-  alias Google.Bigtable.V2.ReadModifyWriteRule
 
   describe "increment_rule/3" do
     test "creates an increment rule" do

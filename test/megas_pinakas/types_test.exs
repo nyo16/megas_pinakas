@@ -1,8 +1,8 @@
 defmodule MegasPinakas.TypesTest do
   use ExUnit.Case, async: true
 
-  alias MegasPinakas.Types
   alias Google.Bigtable.V2.Mutation
+  alias MegasPinakas.Types
 
   describe "encode/2" do
     test "encodes binary as-is" do
@@ -27,7 +27,10 @@ defmodule MegasPinakas.TypesTest do
     test "encodes nested map as JSON" do
       data = %{user: %{name: "John", tags: ["admin", "user"]}}
       encoded = Types.encode(:json, data)
-      assert Jason.decode!(encoded) == %{"user" => %{"name" => "John", "tags" => ["admin", "user"]}}
+
+      assert Jason.decode!(encoded) == %{
+               "user" => %{"name" => "John", "tags" => ["admin", "user"]}
+             }
     end
 
     test "encodes positive integer as 64-bit big-endian" do
@@ -47,7 +50,8 @@ defmodule MegasPinakas.TypesTest do
     end
 
     test "encodes large integer" do
-      large = 9_223_372_036_854_775_807  # Max int64
+      # Max int64
+      large = 9_223_372_036_854_775_807
       encoded = Types.encode(:integer, large)
       assert byte_size(encoded) == 8
     end
@@ -172,7 +176,8 @@ defmodule MegasPinakas.TypesTest do
     end
 
     test "decodes DateTime at Unix epoch" do
-      assert Types.decode(:datetime, <<0, 0, 0, 0, 0, 0, 0, 0>>) == {:ok, ~U[1970-01-01 00:00:00.000000Z]}
+      assert Types.decode(:datetime, <<0, 0, 0, 0, 0, 0, 0, 0>>) ==
+               {:ok, ~U[1970-01-01 00:00:00.000000Z]}
     end
 
     test "returns error for invalid datetime format" do
@@ -315,7 +320,11 @@ defmodule MegasPinakas.TypesTest do
     end
 
     test "datetime roundtrip preserves value" do
-      for dt <- [~U[1970-01-01 00:00:00Z], ~U[2024-01-15 10:30:00.123456Z], ~U[2099-12-31 23:59:59Z]] do
+      for dt <- [
+            ~U[1970-01-01 00:00:00Z],
+            ~U[2024-01-15 10:30:00.123456Z],
+            ~U[2099-12-31 23:59:59Z]
+          ] do
         encoded = Types.encode(:datetime, dt)
         {:ok, decoded} = Types.decode(:datetime, encoded)
         # Compare at microsecond precision
@@ -333,6 +342,7 @@ defmodule MegasPinakas.TypesTest do
         "array" => [1, 2, 3],
         "nested" => %{"a" => "b"}
       }
+
       encoded = Types.encode(:json, data)
       {:ok, decoded} = Types.decode(:json, encoded)
       assert decoded == data
@@ -348,6 +358,7 @@ defmodule MegasPinakas.TypesTest do
           tuple: {:a, :b, :c}
         }
       }
+
       encoded = Types.encode(:term, term)
       {:ok, decoded} = Types.decode(:term, encoded)
       assert decoded == term

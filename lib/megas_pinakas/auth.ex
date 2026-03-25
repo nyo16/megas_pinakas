@@ -8,6 +8,8 @@ defmodule MegasPinakas.Auth do
   3. gcloud CLI fallback - local development authentication
   """
 
+  require Logger
+
   alias MegasPinakas.Config
 
   @doc """
@@ -18,19 +20,23 @@ defmodule MegasPinakas.Auth do
   """
   @spec request_opts() :: keyword()
   def request_opts do
-    if Config.emulator?() do
-      # Emulator: Skip authentication entirely
-      []
-    else
-      # Production: Add authentication
-      case get_token() do
-        {:ok, token} ->
-          [metadata: %{"authorization" => token}]
+    timeout = Config.default_timeout()
 
-        {:error, _reason} ->
-          []
+    base_opts =
+      if Config.emulator?() do
+        []
+      else
+        case get_token() do
+          {:ok, token} ->
+            [metadata: %{"authorization" => token}]
+
+          {:error, reason} ->
+            Logger.warning("BigTable auth token fetch failed: #{inspect(reason)}")
+            []
+        end
       end
-    end
+
+    Keyword.put(base_opts, :timeout, timeout)
   end
 
   @doc """
@@ -53,39 +59,43 @@ defmodule MegasPinakas.Auth do
 
   defp get_token_from_goth(goth_name) do
     if Code.ensure_loaded?(Goth) do
-      case Goth.fetch(goth_name) do
-        {:ok, %{token: token, type: type}} ->
-          {:ok, "#{type} #{token}"}
-
-        {:error, reason} ->
-          # Try fallback if Goth fails
-          case get_token_fallback() do
-            {:ok, token} -> {:ok, token}
-            {:error, _} -> {:error, {:goth_error, reason}}
-          end
-      end
+      fetch_goth_token(goth_name)
     else
       get_token_fallback()
     end
   end
 
-  defp get_token_fallback do
-    try do
-      case System.cmd("gcloud", ["auth", "application-default", "print-access-token"],
-             stderr_to_stdout: true
-           ) do
-        {token_output, 0} ->
-          token = String.trim(token_output)
-          {:ok, "Bearer #{token}"}
+  defp fetch_goth_token(goth_name) do
+    case Goth.fetch(goth_name) do
+      {:ok, %{token: token, type: type}} ->
+        {:ok, "#{type} #{token}"}
 
-        {error_output, _} ->
-          {:error, {:gcloud_error, String.trim(error_output)}}
-      end
-    rescue
-      _ -> {:error, :no_auth_available}
-    catch
-      _ -> {:error, :no_auth_available}
+      {:error, reason} ->
+        # Try fallback if Goth fails
+        case get_token_fallback() do
+          {:ok, token} -> {:ok, token}
+          {:error, _} -> {:error, {:goth_error, reason}}
+        end
     end
+  end
+
+  defp get_token_fallback do
+    case System.cmd("gcloud", ["auth", "application-default", "print-access-token"],
+           stderr_to_stdout: true
+         ) do
+      {token_output, 0} ->
+        token = String.trim(token_output)
+        {:ok, "Bearer #{token}"}
+
+      {error_output, _} ->
+        {:error, {:gcloud_error, String.trim(error_output)}}
+    end
+  rescue
+    e in ErlangError ->
+      {:error, {:gcloud_not_found, Exception.message(e)}}
+
+    e ->
+      {:error, {:auth_error, Exception.message(e)}}
   end
 
   @doc """
