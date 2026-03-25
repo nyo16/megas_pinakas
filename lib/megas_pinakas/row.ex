@@ -107,7 +107,8 @@ defmodule MegasPinakas.Row do
     put_datetime(row, family, qualifier, value, opts)
   end
 
-  def put(%__MODULE__{} = row, family, qualifier, value, opts) when is_map(value) or is_list(value) do
+  def put(%__MODULE__{} = row, family, qualifier, value, opts)
+      when is_map(value) or is_list(value) do
     put_json(row, family, qualifier, value, opts)
   end
 
@@ -119,7 +120,8 @@ defmodule MegasPinakas.Row do
   Adds a raw binary cell value.
   """
   @spec put_binary(t(), String.t(), String.t(), binary(), keyword()) :: t()
-  def put_binary(%__MODULE__{} = row, family, qualifier, value, opts \\ []) when is_binary(value) do
+  def put_binary(%__MODULE__{} = row, family, qualifier, value, opts \\ [])
+      when is_binary(value) do
     mutation = MegasPinakas.set_cell(family, qualifier, value, opts)
     add_mutation(row, mutation)
   end
@@ -128,7 +130,8 @@ defmodule MegasPinakas.Row do
   Adds a UTF-8 string cell value (same encoding as binary).
   """
   @spec put_string(t(), String.t(), String.t(), String.t(), keyword()) :: t()
-  def put_string(%__MODULE__{} = row, family, qualifier, value, opts \\ []) when is_binary(value) do
+  def put_string(%__MODULE__{} = row, family, qualifier, value, opts \\ [])
+      when is_binary(value) do
     mutation = MegasPinakas.set_cell(family, qualifier, value, opts)
     add_mutation(row, mutation)
   end
@@ -236,7 +239,13 @@ defmodule MegasPinakas.Row do
   """
   @spec write(t(), String.t(), String.t(), String.t(), keyword()) ::
           {:ok, term()} | {:error, term()}
-  def write(%__MODULE__{row_key: row_key, mutations: mutations}, project, instance, table, opts \\ []) do
+  def write(
+        %__MODULE__{row_key: row_key, mutations: mutations},
+        project,
+        instance,
+        table,
+        opts \\ []
+      ) do
     # Reverse mutations to maintain insertion order
     MegasPinakas.mutate_row(project, instance, table, row_key, Enum.reverse(mutations), opts)
   end

@@ -15,7 +15,11 @@ defmodule MegasPinakas.MixProject do
       description: description(),
       package: package(),
       docs: docs(),
-      source_url: @source_url
+      source_url: @source_url,
+      dialyzer: [
+        plt_add_apps: [:mix],
+        plt_file: {:no_warn, "priv/plts/dialyzer.plt"}
+      ]
     ]
   end
 
@@ -52,9 +56,9 @@ defmodule MegasPinakas.MixProject do
       source_ref: "v#{@version}",
       source_url: @source_url,
       groups_for_modules: [
-        "Core": [
+        Core: [
           MegasPinakas,
-          MegasPinakas.Connection
+          MegasPinakas.Client
         ],
         "High-Level APIs": [
           MegasPinakas.Cache,
@@ -63,13 +67,13 @@ defmodule MegasPinakas.MixProject do
           MegasPinakas.TimeSeries,
           MegasPinakas.Streaming
         ],
-        "Builders": [
+        Builders: [
           MegasPinakas.Row,
           MegasPinakas.Batch,
           MegasPinakas.Filter,
           MegasPinakas.Types
         ],
-        "Administration": [
+        Administration: [
           MegasPinakas.Admin,
           MegasPinakas.InstanceAdmin
         ]
@@ -79,10 +83,12 @@ defmodule MegasPinakas.MixProject do
 
   defp deps do
     [
-      {:grpc_connection_pool, "~> 0.2.1"},
+      {:grpc_connection_pool, "~> 0.3.0"},
       {:googleapis_proto_ex, "~> 0.3.3"},
       {:goth, "~> 1.4"},
-      {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.31", only: :dev, runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 end

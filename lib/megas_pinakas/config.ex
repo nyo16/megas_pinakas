@@ -8,6 +8,7 @@ defmodule MegasPinakas.Config do
   @default_emulator_port 8086
   @production_host "bigtable.googleapis.com"
   @production_port 443
+  @default_timeout 30_000
 
   # Resource Path Builders
 
@@ -208,5 +209,16 @@ defmodule MegasPinakas.Config do
   @spec production_endpoint() :: {String.t(), integer()}
   def production_endpoint do
     {@production_host, @production_port}
+  end
+
+  @doc """
+  Returns the default gRPC timeout in milliseconds.
+
+  Configurable via `:default_timeout` in the `:megas_pinakas` application config.
+  Defaults to #{@default_timeout}ms.
+  """
+  @spec default_timeout() :: non_neg_integer()
+  def default_timeout do
+    Application.get_env(:megas_pinakas, :default_timeout, @default_timeout)
   end
 end

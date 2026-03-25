@@ -30,17 +30,44 @@ defmodule MegasPinakas.Client do
   @spec execute((GRPC.Channel.t() -> any()), keyword()) :: {:ok, any()} | {:error, term()}
   def execute(operation_fn, opts \\ []) when is_function(operation_fn, 1) do
     pool_name = Keyword.get(opts, :pool, @default_pool)
+    start_time = System.monotonic_time()
+    metadata = %{pool: pool_name}
+
+    :telemetry.execute(
+      [:megas_pinakas, :request, :start],
+      %{system_time: System.system_time()},
+      metadata
+    )
 
     case GrpcConnectionPool.get_channel(pool_name) do
       {:ok, channel} ->
         try do
           result = operation_fn.(channel)
-          {:ok, result}
+          duration = System.monotonic_time() - start_time
+          :telemetry.execute([:megas_pinakas, :request, :stop], %{duration: duration}, metadata)
+          result
         rescue
-          e -> {:error, {:execution_error, e}}
+          e ->
+            duration = System.monotonic_time() - start_time
+
+            :telemetry.execute(
+              [:megas_pinakas, :request, :exception],
+              %{duration: duration},
+              Map.put(metadata, :reason, Exception.message(e))
+            )
+
+            {:error, {:execution_error, Exception.message(e)}}
         end
 
       {:error, reason} ->
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:megas_pinakas, :request, :exception],
+          %{duration: duration},
+          Map.put(metadata, :reason, reason)
+        )
+
         {:error, reason}
     end
   end
@@ -91,12 +118,4 @@ defmodule MegasPinakas.Client do
   """
   @spec default_pool() :: atom()
   def default_pool, do: @default_pool
-
-  @doc """
-  Alias for `execute/2` for backward compatibility.
-  """
-  @spec with_connection((GRPC.Channel.t() -> any()), keyword()) :: {:ok, any()} | {:error, term()}
-  def with_connection(fun, opts \\ []) when is_function(fun, 1) do
-    execute(fun, opts)
-  end
 end

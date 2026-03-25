@@ -4,11 +4,13 @@ defmodule MegasPinakas.AuthTest do
   alias MegasPinakas.Auth
 
   describe "request_opts/0" do
-    test "returns empty list when emulator is configured" do
+    test "returns timeout only when emulator is configured" do
       original = Application.get_env(:megas_pinakas, :emulator)
       Application.put_env(:megas_pinakas, :emulator, host: "localhost", port: 8086)
 
-      assert Auth.request_opts() == []
+      opts = Auth.request_opts()
+      assert Keyword.has_key?(opts, :timeout)
+      refute Keyword.has_key?(opts, :metadata)
 
       # Restore
       if original do
@@ -18,14 +20,16 @@ defmodule MegasPinakas.AuthTest do
       end
     end
 
-    test "returns empty list when BIGTABLE_EMULATOR_HOST is set" do
+    test "returns timeout only when BIGTABLE_EMULATOR_HOST is set" do
       original_config = Application.get_env(:megas_pinakas, :emulator)
       original_env = System.get_env("BIGTABLE_EMULATOR_HOST")
 
       Application.delete_env(:megas_pinakas, :emulator)
       System.put_env("BIGTABLE_EMULATOR_HOST", "localhost:8086")
 
-      assert Auth.request_opts() == []
+      opts = Auth.request_opts()
+      assert Keyword.has_key?(opts, :timeout)
+      refute Keyword.has_key?(opts, :metadata)
 
       # Restore
       System.delete_env("BIGTABLE_EMULATOR_HOST")

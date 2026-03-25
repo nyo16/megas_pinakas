@@ -33,6 +33,8 @@ defmodule MegasPinakas.Streaming do
       |> Stream.run()
   """
 
+  require Logger
+
   alias MegasPinakas
 
   # ============================================================================
@@ -139,7 +141,8 @@ defmodule MegasPinakas.Streaming do
       MegasPinakas.Streaming.stream_prefix(project, instance, "table", "user#")
       |> Enum.take(100)
   """
-  @spec stream_range(String.t(), String.t(), String.t(), binary(), binary(), keyword()) :: Enumerable.t()
+  @spec stream_range(String.t(), String.t(), String.t(), binary(), binary(), keyword()) ::
+          Enumerable.t()
   def stream_range(project, instance, table, start_key, end_key, opts \\ []) do
     row_range = MegasPinakas.row_range(start_key, end_key)
     row_set = MegasPinakas.row_set_from_ranges([row_range])
@@ -187,7 +190,8 @@ defmodule MegasPinakas.Streaming do
       )
       |> Enum.sum()  # Total rows processed
   """
-  @spec stream_in_chunks(String.t(), String.t(), String.t(), keyword(), keyword()) :: Enumerable.t()
+  @spec stream_in_chunks(String.t(), String.t(), String.t(), keyword(), keyword()) ::
+          Enumerable.t()
   def stream_in_chunks(project, instance, table, read_opts, opts) do
     chunk_size = Keyword.get(opts, :chunk_size, 100)
     process_fn = Keyword.get(opts, :process_fn, fn chunk -> chunk end)
@@ -296,12 +300,20 @@ defmodule MegasPinakas.Streaming do
             {:halt, %{state | done: true}}
         end
 
-      {:error, _reason} ->
+      {:error, reason} ->
+        Logger.warning("BigTable stream pagination error: #{inspect(reason)}")
         {:halt, %{state | done: true}}
     end
   end
 
-  defp fetch_batch(%{project: project, instance: instance, table: table, opts: opts, batch_size: batch_size, last_key: last_key}) do
+  defp fetch_batch(%{
+         project: project,
+         instance: instance,
+         table: table,
+         opts: opts,
+         batch_size: batch_size,
+         last_key: last_key
+       }) do
     # Build updated opts with pagination
     read_opts =
       if last_key do
@@ -316,9 +328,7 @@ defmodule MegasPinakas.Streaming do
             # Update first range to start after last_key
             [first_range | rest] = ranges
 
-            updated_range = %{first_range |
-              start_key: {:start_key_open, last_key}
-            }
+            updated_range = %{first_range | start_key: {:start_key_open, last_key}}
 
             updated_row_set = %Google.Bigtable.V2.RowSet{
               row_keys: [],

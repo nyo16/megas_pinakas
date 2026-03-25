@@ -68,7 +68,8 @@ defmodule MegasPinakas.Filter do
       MegasPinakas.Filter.row_sample_filter(0.5)
   """
   @spec row_sample_filter(float()) :: RowFilter.t()
-  def row_sample_filter(probability) when is_float(probability) and probability >= 0.0 and probability <= 1.0 do
+  def row_sample_filter(probability)
+      when is_float(probability) and probability >= 0.0 and probability <= 1.0 do
     %RowFilter{filter: {:row_sample_filter, probability}}
   end
 

@@ -215,7 +215,16 @@ defmodule MegasPinakas.Types do
   @doc """
   Writes a raw binary value to a cell.
   """
-  @spec write_binary(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), binary(), keyword()) ::
+  @spec write_binary(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          binary(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
   def write_binary(project, instance, table, row_key, family, qualifier, binary, opts \\ [])
       when is_binary(binary) do
@@ -226,7 +235,16 @@ defmodule MegasPinakas.Types do
   @doc """
   Writes a UTF-8 string value to a cell.
   """
-  @spec write_string(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec write_string(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
   def write_string(project, instance, table, row_key, family, qualifier, string, opts \\ [])
       when is_binary(string) do
@@ -236,7 +254,16 @@ defmodule MegasPinakas.Types do
   @doc """
   Writes a JSON-encoded map or list to a cell.
   """
-  @spec write_json(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), map() | list(), keyword()) ::
+  @spec write_json(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          map() | list(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
   def write_json(project, instance, table, row_key, family, qualifier, data, opts \\ [])
       when is_map(data) or is_list(data) do
@@ -247,7 +274,16 @@ defmodule MegasPinakas.Types do
   @doc """
   Writes a 64-bit signed integer to a cell (big-endian for sortability).
   """
-  @spec write_integer(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), integer(), keyword()) ::
+  @spec write_integer(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          integer(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
   def write_integer(project, instance, table, row_key, family, qualifier, integer, opts \\ [])
       when is_integer(integer) do
@@ -258,7 +294,16 @@ defmodule MegasPinakas.Types do
   @doc """
   Writes a 64-bit float to a cell.
   """
-  @spec write_float(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), float(), keyword()) ::
+  @spec write_float(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          float(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
   def write_float(project, instance, table, row_key, family, qualifier, float, opts \\ [])
       when is_float(float) do
@@ -269,7 +314,16 @@ defmodule MegasPinakas.Types do
   @doc """
   Writes a boolean to a cell.
   """
-  @spec write_boolean(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), boolean(), keyword()) ::
+  @spec write_boolean(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          boolean(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
   def write_boolean(project, instance, table, row_key, family, qualifier, bool, opts \\ [])
       when is_boolean(bool) do
@@ -280,9 +334,27 @@ defmodule MegasPinakas.Types do
   @doc """
   Writes a DateTime to a cell (microseconds since Unix epoch).
   """
-  @spec write_datetime(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), DateTime.t(), keyword()) ::
+  @spec write_datetime(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          DateTime.t(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
-  def write_datetime(project, instance, table, row_key, family, qualifier, %DateTime{} = datetime, opts \\ []) do
+  def write_datetime(
+        project,
+        instance,
+        table,
+        row_key,
+        family,
+        qualifier,
+        %DateTime{} = datetime,
+        opts \\ []
+      ) do
     mutations = [set_datetime(family, qualifier, datetime, opts)]
     MegasPinakas.mutate_row(project, instance, table, row_key, mutations, opts)
   end
@@ -290,7 +362,16 @@ defmodule MegasPinakas.Types do
   @doc """
   Writes any Elixir term to a cell (via erlang term_to_binary).
   """
-  @spec write_term(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), term(), keyword()) ::
+  @spec write_term(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          term(),
+          keyword()
+        ) ::
           {:ok, term()} | {:error, term()}
   def write_term(project, instance, table, row_key, family, qualifier, term, opts \\ []) do
     mutations = [set_term(family, qualifier, term, opts)]
@@ -304,7 +385,15 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads a raw binary value from a cell.
   """
-  @spec read_binary(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec read_binary(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, binary() | nil} | {:error, term()}
   def read_binary(project, instance, table, row_key, family, qualifier, opts \\ []) do
     read_cell_as(project, instance, table, row_key, family, qualifier, :binary, opts)
@@ -313,7 +402,15 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads a UTF-8 string value from a cell.
   """
-  @spec read_string(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec read_string(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, String.t() | nil} | {:error, term()}
   def read_string(project, instance, table, row_key, family, qualifier, opts \\ []) do
     read_cell_as(project, instance, table, row_key, family, qualifier, :string, opts)
@@ -322,7 +419,15 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads and decodes a JSON value from a cell.
   """
-  @spec read_json(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec read_json(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, map() | list() | nil} | {:error, term()}
   def read_json(project, instance, table, row_key, family, qualifier, opts \\ []) do
     read_cell_as(project, instance, table, row_key, family, qualifier, :json, opts)
@@ -331,7 +436,15 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads and decodes a 64-bit integer from a cell.
   """
-  @spec read_integer(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec read_integer(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, integer() | nil} | {:error, term()}
   def read_integer(project, instance, table, row_key, family, qualifier, opts \\ []) do
     read_cell_as(project, instance, table, row_key, family, qualifier, :integer, opts)
@@ -340,7 +453,15 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads and decodes a 64-bit float from a cell.
   """
-  @spec read_float(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec read_float(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, float() | nil} | {:error, term()}
   def read_float(project, instance, table, row_key, family, qualifier, opts \\ []) do
     read_cell_as(project, instance, table, row_key, family, qualifier, :float, opts)
@@ -349,7 +470,15 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads and decodes a boolean from a cell.
   """
-  @spec read_boolean(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec read_boolean(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, boolean() | nil} | {:error, term()}
   def read_boolean(project, instance, table, row_key, family, qualifier, opts \\ []) do
     read_cell_as(project, instance, table, row_key, family, qualifier, :boolean, opts)
@@ -358,7 +487,15 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads and decodes a DateTime from a cell.
   """
-  @spec read_datetime(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec read_datetime(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, DateTime.t() | nil} | {:error, term()}
   def read_datetime(project, instance, table, row_key, family, qualifier, opts \\ []) do
     read_cell_as(project, instance, table, row_key, family, qualifier, :datetime, opts)
@@ -367,7 +504,15 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads and decodes an Elixir term from a cell.
   """
-  @spec read_term(String.t(), String.t(), String.t(), String.t(), String.t(), String.t(), keyword()) ::
+  @spec read_term(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
           {:ok, term() | nil} | {:error, term()}
   def read_term(project, instance, table, row_key, family, qualifier, opts \\ []) do
     read_cell_as(project, instance, table, row_key, family, qualifier, :term, opts)

@@ -9,7 +9,8 @@ defmodule MegasPinakas.TimeSeriesTest do
       result = TimeSeries.reverse_timestamp(dt)
 
       assert is_binary(result)
-      assert String.length(result) == 19  # Padded to 19 chars
+      # Padded to 19 chars
+      assert String.length(result) == 19
     end
 
     test "earlier timestamps produce larger reverse timestamps" do

@@ -21,7 +21,7 @@ defmodule MegasPinakas.Application do
       {GrpcConnectionPool, pool_config}
     ]
 
-    opts = [strategy: :one_for_one, name: MegasPinakas.Supervisor]
+    opts = [strategy: :rest_for_one, name: MegasPinakas.Supervisor]
     Supervisor.start_link(children, opts)
   end
 end

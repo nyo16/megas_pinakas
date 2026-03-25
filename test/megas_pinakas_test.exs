@@ -1,7 +1,17 @@
 defmodule MegasPinakasTest do
   use ExUnit.Case, async: true
 
-  alias Google.Bigtable.V2.{Cell, Column, Family, Mutation, ReadModifyWriteRule, Row, RowFilter, RowRange, RowSet}
+  alias Google.Bigtable.V2.{
+    Cell,
+    Column,
+    Family,
+    Mutation,
+    ReadModifyWriteRule,
+    Row,
+    RowFilter,
+    RowRange,
+    RowSet
+  }
 
   describe "mutation builders" do
     test "set_cell/3 creates a SetCell mutation with default timestamp" do
@@ -15,10 +25,10 @@ defmodule MegasPinakasTest do
     end
 
     test "set_cell/4 creates a SetCell mutation with custom timestamp" do
-      mutation = MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 1234567890)
+      mutation = MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 1_234_567_890)
 
       assert %Mutation{mutation: {:set_cell, set_cell}} = mutation
-      assert set_cell.timestamp_micros == 1234567890
+      assert set_cell.timestamp_micros == 1_234_567_890
     end
 
     test "delete_from_column/2 creates a DeleteFromColumn mutation" do
@@ -247,29 +257,33 @@ defmodule MegasPinakasTest do
 
   describe "row_to_map/1" do
     test "converts a row to a nested map" do
-      row = build_test_row("user#123", [
-        {"cf", [
-          {"name", [{"John Doe", 1000}]},
-          {"email", [{"john@example.com", 2000}]}
-        ]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf",
+           [
+             {"name", [{"John Doe", 1000}]},
+             {"email", [{"john@example.com", 2000}]}
+           ]}
+        ])
 
       result = MegasPinakas.row_to_map(row)
 
       assert result == %{
-        "cf" => %{
-          "name" => "John Doe",
-          "email" => "john@example.com"
-        }
-      }
+               "cf" => %{
+                 "name" => "John Doe",
+                 "email" => "john@example.com"
+               }
+             }
     end
 
     test "returns most recent value when multiple versions exist" do
-      row = build_test_row("user#123", [
-        {"cf", [
-          {"name", [{"New Name", 2000}, {"Old Name", 1000}]}
-        ]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf",
+           [
+             {"name", [{"New Name", 2000}, {"Old Name", 1000}]}
+           ]}
+        ])
 
       result = MegasPinakas.row_to_map(row)
 
@@ -277,17 +291,18 @@ defmodule MegasPinakasTest do
     end
 
     test "handles multiple families" do
-      row = build_test_row("user#123", [
-        {"cf", [{"name", [{"John", 1000}]}]},
-        {"metadata", [{"created", [{"2024-01-01", 1000}]}]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf", [{"name", [{"John", 1000}]}]},
+          {"metadata", [{"created", [{"2024-01-01", 1000}]}]}
+        ])
 
       result = MegasPinakas.row_to_map(row)
 
       assert result == %{
-        "cf" => %{"name" => "John"},
-        "metadata" => %{"created" => "2024-01-01"}
-      }
+               "cf" => %{"name" => "John"},
+               "metadata" => %{"created" => "2024-01-01"}
+             }
     end
 
     test "returns empty map for nil" do
@@ -303,39 +318,45 @@ defmodule MegasPinakasTest do
 
   describe "get_cell/3" do
     test "returns the cell value for given family and qualifier" do
-      row = build_test_row("user#123", [
-        {"cf", [
-          {"name", [{"John Doe", 1000}]},
-          {"email", [{"john@example.com", 2000}]}
-        ]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf",
+           [
+             {"name", [{"John Doe", 1000}]},
+             {"email", [{"john@example.com", 2000}]}
+           ]}
+        ])
 
       assert MegasPinakas.get_cell(row, "cf", "name") == "John Doe"
       assert MegasPinakas.get_cell(row, "cf", "email") == "john@example.com"
     end
 
     test "returns most recent value when multiple versions exist" do
-      row = build_test_row("user#123", [
-        {"cf", [
-          {"name", [{"New Name", 2000}, {"Old Name", 1000}]}
-        ]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf",
+           [
+             {"name", [{"New Name", 2000}, {"Old Name", 1000}]}
+           ]}
+        ])
 
       assert MegasPinakas.get_cell(row, "cf", "name") == "New Name"
     end
 
     test "returns nil for non-existent family" do
-      row = build_test_row("user#123", [
-        {"cf", [{"name", [{"John", 1000}]}]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf", [{"name", [{"John", 1000}]}]}
+        ])
 
       assert MegasPinakas.get_cell(row, "other", "name") == nil
     end
 
     test "returns nil for non-existent qualifier" do
-      row = build_test_row("user#123", [
-        {"cf", [{"name", [{"John", 1000}]}]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf", [{"name", [{"John", 1000}]}]}
+        ])
 
       assert MegasPinakas.get_cell(row, "cf", "other") == nil
     end
@@ -347,40 +368,45 @@ defmodule MegasPinakasTest do
 
   describe "get_cells/3" do
     test "returns all cell versions with timestamps" do
-      row = build_test_row("user#123", [
-        {"cf", [
-          {"name", [{"New Name", 2000}, {"Old Name", 1000}]}
-        ]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf",
+           [
+             {"name", [{"New Name", 2000}, {"Old Name", 1000}]}
+           ]}
+        ])
 
       result = MegasPinakas.get_cells(row, "cf", "name")
 
       assert result == [
-        %{value: "New Name", timestamp: 2000},
-        %{value: "Old Name", timestamp: 1000}
-      ]
+               %{value: "New Name", timestamp: 2000},
+               %{value: "Old Name", timestamp: 1000}
+             ]
     end
 
     test "returns single cell as list" do
-      row = build_test_row("user#123", [
-        {"cf", [{"name", [{"John", 1000}]}]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf", [{"name", [{"John", 1000}]}]}
+        ])
 
       assert MegasPinakas.get_cells(row, "cf", "name") == [%{value: "John", timestamp: 1000}]
     end
 
     test "returns empty list for non-existent family" do
-      row = build_test_row("user#123", [
-        {"cf", [{"name", [{"John", 1000}]}]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf", [{"name", [{"John", 1000}]}]}
+        ])
 
       assert MegasPinakas.get_cells(row, "other", "name") == []
     end
 
     test "returns empty list for non-existent qualifier" do
-      row = build_test_row("user#123", [
-        {"cf", [{"name", [{"John", 1000}]}]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf", [{"name", [{"John", 1000}]}]}
+        ])
 
       assert MegasPinakas.get_cells(row, "cf", "other") == []
     end
@@ -392,12 +418,14 @@ defmodule MegasPinakasTest do
 
   describe "get_family/2" do
     test "returns all columns in a family as a map" do
-      row = build_test_row("user#123", [
-        {"cf", [
-          {"name", [{"John Doe", 1000}]},
-          {"email", [{"john@example.com", 2000}]}
-        ]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf",
+           [
+             {"name", [{"John Doe", 1000}]},
+             {"email", [{"john@example.com", 2000}]}
+           ]}
+        ])
 
       result = MegasPinakas.get_family(row, "cf")
 
@@ -405,9 +433,10 @@ defmodule MegasPinakasTest do
     end
 
     test "returns empty map for non-existent family" do
-      row = build_test_row("user#123", [
-        {"cf", [{"name", [{"John", 1000}]}]}
-      ])
+      row =
+        build_test_row("user#123", [
+          {"cf", [{"name", [{"John", 1000}]}]}
+        ])
 
       assert MegasPinakas.get_family(row, "other") == %{}
     end
@@ -439,9 +468,9 @@ defmodule MegasPinakasTest do
       result = MegasPinakas.rows_to_list(rows)
 
       assert result == [
-        %{key: "user#1", data: %{"cf" => %{"name" => "Alice"}}},
-        %{key: "user#2", data: %{"cf" => %{"name" => "Bob"}}}
-      ]
+               %{key: "user#1", data: %{"cf" => %{"name" => "Alice"}}},
+               %{key: "user#2", data: %{"cf" => %{"name" => "Bob"}}}
+             ]
     end
 
     test "handles empty list" do
@@ -459,8 +488,11 @@ defmodule MegasPinakasTest do
       result = MegasPinakas.rows_to_list(rows)
 
       assert result == [
-        %{key: "row#1", data: %{"cf" => %{"col1" => "val1"}, "meta" => %{"created" => "2024"}}}
-      ]
+               %{
+                 key: "row#1",
+                 data: %{"cf" => %{"col1" => "val1"}, "meta" => %{"created" => "2024"}}
+               }
+             ]
     end
   end
 end

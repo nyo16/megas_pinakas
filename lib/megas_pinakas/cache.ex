@@ -112,7 +112,8 @@ defmodule MegasPinakas.Cache do
   """
   @spec get_or_put(String.t(), String.t(), String.t(), String.t(), (-> term()), keyword()) ::
           {:ok, term()} | {:error, term()}
-  def get_or_put(project, instance, table, key, default_fn, opts \\ []) when is_function(default_fn, 0) do
+  def get_or_put(project, instance, table, key, default_fn, opts \\ [])
+      when is_function(default_fn, 0) do
     case get(project, instance, table, key, opts) do
       {:ok, nil} ->
         value = default_fn.()

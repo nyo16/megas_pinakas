@@ -28,7 +28,8 @@ defmodule MegasPinakas.CounterTTLTest do
   describe "build_row_key/3" do
     test "builds row key with minute bucket" do
       # Use a known timestamp
-      timestamp = 1704067200  # 2024-01-01 00:00:00 UTC
+      # 2024-01-01 00:00:00 UTC
+      timestamp = 1_704_067_200
       row_key = CounterTTL.build_row_key("user#123", :minute, timestamp)
 
       # Should be aligned to minute boundary
@@ -37,7 +38,8 @@ defmodule MegasPinakas.CounterTTLTest do
     end
 
     test "builds row key with hour bucket" do
-      timestamp = 1704067200  # 2024-01-01 00:00:00 UTC (already aligned)
+      # 2024-01-01 00:00:00 UTC (already aligned)
+      timestamp = 1_704_067_200
       row_key = CounterTTL.build_row_key("api:requests", :hour, timestamp)
 
       assert row_key == "api:requests#1704067200"
@@ -45,7 +47,7 @@ defmodule MegasPinakas.CounterTTLTest do
 
     test "aligns timestamp to bucket boundary" do
       # 1704067245 = 2024-01-01 00:00:45 UTC (45 seconds into the minute)
-      timestamp = 1704067245
+      timestamp = 1_704_067_245
       row_key = CounterTTL.build_row_key("user#123", :minute, timestamp)
 
       # Should align to minute boundary (1704067200)
@@ -69,7 +71,7 @@ defmodule MegasPinakas.CounterTTLTest do
 
       assert {:ok, parsed} = result
       assert parsed.key == "user#123"
-      assert parsed.bucket_timestamp == 1704067200
+      assert parsed.bucket_timestamp == 1_704_067_200
     end
 
     test "handles keys with multiple hash signs" do
@@ -77,7 +79,7 @@ defmodule MegasPinakas.CounterTTLTest do
 
       assert {:ok, parsed} = result
       assert parsed.key == "api#v1#endpoint"
-      assert parsed.bucket_timestamp == 1704067200
+      assert parsed.bucket_timestamp == 1_704_067_200
     end
 
     test "returns error for invalid format (no timestamp)" do
@@ -91,7 +93,7 @@ defmodule MegasPinakas.CounterTTLTest do
 
       assert {:ok, parsed} = result
       assert parsed.key == "mykey"
-      assert parsed.bucket_timestamp == 1704067200
+      assert parsed.bucket_timestamp == 1_704_067_200
     end
   end
 

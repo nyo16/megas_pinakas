@@ -114,10 +114,11 @@ defmodule MegasPinakas.FilterTest do
 
   describe "column_range_filter/2" do
     test "creates a column range filter with closed start and open end" do
-      filter = Filter.column_range_filter("cf",
-        start_qualifier_closed: "a",
-        end_qualifier_open: "m"
-      )
+      filter =
+        Filter.column_range_filter("cf",
+          start_qualifier_closed: "a",
+          end_qualifier_open: "m"
+        )
 
       assert %RowFilter{filter: {:column_range_filter, range}} = filter
       assert %ColumnRange{family_name: "cf"} = range
@@ -126,10 +127,11 @@ defmodule MegasPinakas.FilterTest do
     end
 
     test "creates a column range filter with open start and closed end" do
-      filter = Filter.column_range_filter("cf",
-        start_qualifier_open: "a",
-        end_qualifier_closed: "z"
-      )
+      filter =
+        Filter.column_range_filter("cf",
+          start_qualifier_open: "a",
+          end_qualifier_closed: "z"
+        )
 
       assert %RowFilter{filter: {:column_range_filter, range}} = filter
       assert range.start_qualifier == {:start_qualifier_open, "a"}
@@ -137,9 +139,10 @@ defmodule MegasPinakas.FilterTest do
     end
 
     test "creates a column range filter with only start" do
-      filter = Filter.column_range_filter("cf",
-        start_qualifier_closed: "x"
-      )
+      filter =
+        Filter.column_range_filter("cf",
+          start_qualifier_closed: "x"
+        )
 
       assert %RowFilter{filter: {:column_range_filter, range}} = filter
       assert range.start_qualifier == {:start_qualifier_closed, "x"}
@@ -147,9 +150,10 @@ defmodule MegasPinakas.FilterTest do
     end
 
     test "creates a column range filter with only end" do
-      filter = Filter.column_range_filter("cf",
-        end_qualifier_open: "m"
-      )
+      filter =
+        Filter.column_range_filter("cf",
+          end_qualifier_open: "m"
+        )
 
       assert %RowFilter{filter: {:column_range_filter, range}} = filter
       assert range.start_qualifier == nil
@@ -190,10 +194,11 @@ defmodule MegasPinakas.FilterTest do
 
   describe "value_range_filter/1" do
     test "creates a value range filter with closed bounds" do
-      filter = Filter.value_range_filter(
-        start_value_closed: "A",
-        end_value_closed: "Z"
-      )
+      filter =
+        Filter.value_range_filter(
+          start_value_closed: "A",
+          end_value_closed: "Z"
+        )
 
       assert %RowFilter{filter: {:value_range_filter, range}} = filter
       assert %ValueRange{} = range
@@ -202,10 +207,11 @@ defmodule MegasPinakas.FilterTest do
     end
 
     test "creates a value range filter with open bounds" do
-      filter = Filter.value_range_filter(
-        start_value_open: "A",
-        end_value_open: "Z"
-      )
+      filter =
+        Filter.value_range_filter(
+          start_value_open: "A",
+          end_value_open: "Z"
+        )
 
       assert %RowFilter{filter: {:value_range_filter, range}} = filter
       assert range.start_value == {:start_value_open, "A"}
@@ -213,10 +219,11 @@ defmodule MegasPinakas.FilterTest do
     end
 
     test "creates a value range filter with binary values" do
-      filter = Filter.value_range_filter(
-        start_value_closed: <<0, 0, 0, 100>>,
-        end_value_open: <<0, 0, 0, 200>>
-      )
+      filter =
+        Filter.value_range_filter(
+          start_value_closed: <<0, 0, 0, 100>>,
+          end_value_open: <<0, 0, 0, 200>>
+        )
 
       assert %RowFilter{filter: {:value_range_filter, range}} = filter
       assert range.start_value == {:start_value_closed, <<0, 0, 0, 100>>}
@@ -327,10 +334,11 @@ defmodule MegasPinakas.FilterTest do
 
   describe "chain_filters/1" do
     test "chains multiple filters" do
-      filter = Filter.chain_filters([
-        Filter.family_filter("cf"),
-        Filter.cells_per_column_limit_filter(1)
-      ])
+      filter =
+        Filter.chain_filters([
+          Filter.family_filter("cf"),
+          Filter.cells_per_column_limit_filter(1)
+        ])
 
       assert %RowFilter{filter: {:chain, chain}} = filter
       assert length(chain.filters) == 2
@@ -353,10 +361,11 @@ defmodule MegasPinakas.FilterTest do
 
   describe "interleave_filters/1" do
     test "interleaves multiple filters" do
-      filter = Filter.interleave_filters([
-        Filter.family_filter("cf1"),
-        Filter.family_filter("cf2")
-      ])
+      filter =
+        Filter.interleave_filters([
+          Filter.family_filter("cf1"),
+          Filter.family_filter("cf2")
+        ])
 
       assert %RowFilter{filter: {:interleave, interleave}} = filter
       assert length(interleave.filters) == 2
@@ -372,11 +381,12 @@ defmodule MegasPinakas.FilterTest do
 
   describe "condition_filter/3" do
     test "creates a condition filter with both branches" do
-      filter = Filter.condition_filter(
-        Filter.column_filter("cf", "admin"),
-        Filter.pass_all_filter(),
-        Filter.block_all_filter()
-      )
+      filter =
+        Filter.condition_filter(
+          Filter.column_filter("cf", "admin"),
+          Filter.pass_all_filter(),
+          Filter.block_all_filter()
+        )
 
       assert %RowFilter{filter: {:condition, condition}} = filter
       assert %RowFilter.Condition{} = condition
@@ -386,10 +396,11 @@ defmodule MegasPinakas.FilterTest do
     end
 
     test "creates a condition filter with only true branch" do
-      filter = Filter.condition_filter(
-        Filter.value_regex_filter("error"),
-        Filter.apply_label_filter("has_error")
-      )
+      filter =
+        Filter.condition_filter(
+          Filter.value_regex_filter("error"),
+          Filter.apply_label_filter("has_error")
+        )
 
       assert %RowFilter{filter: {:condition, condition}} = filter
       assert condition.predicate_filter != nil
@@ -445,7 +456,8 @@ defmodule MegasPinakas.FilterTest do
       assert %RowFilter{filter: {:timestamp_range_filter, range}} = filter
       # 7 days in microseconds = 7 * 86400 * 1_000_000 = 604_800_000_000
       diff = range.end_timestamp_micros - range.start_timestamp_micros
-      assert_in_delta diff, 604_800_000_000, 1_000_000  # Allow 1 second tolerance
+      # Allow 1 second tolerance
+      assert_in_delta diff, 604_800_000_000, 1_000_000
     end
 
     test "supports various time units" do

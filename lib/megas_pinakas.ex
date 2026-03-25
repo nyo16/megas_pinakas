@@ -32,6 +32,8 @@ defmodule MegasPinakas do
 
   alias MegasPinakas.{Auth, Client, Config}
 
+  require Logger
+
   # Aliases for protobuf modules
   alias Google.Bigtable.V2.{
     Bigtable.Stub,
@@ -60,7 +62,7 @@ defmodule MegasPinakas do
   @doc """
   Reads rows from a BigTable table.
 
-  Returns a stream of row chunks that need to be assembled into complete rows.
+  Returns a list of assembled rows matching the request criteria.
 
   ## Options
 
@@ -72,18 +74,18 @@ defmodule MegasPinakas do
   ## Examples
 
       # Read all rows
-      {:ok, stream} = MegasPinakas.read_rows("project", "instance", "table")
+      {:ok, rows} = MegasPinakas.read_rows("project", "instance", "table")
 
       # Read specific row keys
-      {:ok, stream} = MegasPinakas.read_rows("project", "instance", "table",
+      {:ok, rows} = MegasPinakas.read_rows("project", "instance", "table",
         rows: MegasPinakas.row_set(["row1", "row2", "row3"]))
 
       # Read with filter
-      {:ok, stream} = MegasPinakas.read_rows("project", "instance", "table",
+      {:ok, rows} = MegasPinakas.read_rows("project", "instance", "table",
         filter: MegasPinakas.column_filter("cf", "col"))
   """
   @spec read_rows(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, Enumerable.t()} | {:error, term()}
+          {:ok, [Row.t()]} | {:error, term()}
   def read_rows(project_id, instance_id, table_id, opts \\ []) do
     operation = fn channel ->
       request = %ReadRowsRequest{
@@ -99,7 +101,13 @@ defmodule MegasPinakas do
       Stub.read_rows(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    case Client.execute(operation) do
+      {:ok, stream} ->
+        {:ok, collect_read_rows_stream(stream)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc """
@@ -118,26 +126,17 @@ defmodule MegasPinakas do
   """
   @spec read_row(String.t(), String.t(), String.t(), binary(), keyword()) ::
           {:ok, Row.t() | nil} | {:error, term()}
-  def read_row(project_id, instance_id, table_id, row_key, opts \\ []) do
-    rows = row_set([row_key])
-    opts = Keyword.put(opts, :rows, rows)
-    opts = Keyword.put(opts, :rows_limit, 1)
+  def read_row(project_id, instance_id, table_id, row_key, opts \\ [])
+      when is_binary(row_key) do
+    opts =
+      opts
+      |> Keyword.put(:rows, row_set([row_key]))
+      |> Keyword.put(:rows_limit, 1)
 
     case read_rows(project_id, instance_id, table_id, opts) do
-      {:ok, {:ok, stream}} ->
-        # Collect all chunks and assemble into rows
-        rows = collect_read_rows_stream(stream)
-
-        case rows do
-          [row | _] -> {:ok, row}
-          [] -> {:ok, nil}
-        end
-
-      {:ok, {:error, reason}} ->
-        {:error, reason}
-
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, [row | _]} -> {:ok, row}
+      {:ok, []} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -192,7 +191,8 @@ defmodule MegasPinakas do
   """
   @spec mutate_row(String.t(), String.t(), String.t(), binary(), [Mutation.t()], keyword()) ::
           {:ok, MutateRowResponse.t()} | {:error, term()}
-  def mutate_row(project_id, instance_id, table_id, row_key, mutations, opts \\ []) do
+  def mutate_row(project_id, instance_id, table_id, row_key, mutations, opts \\ [])
+      when is_binary(row_key) and is_list(mutations) do
     operation = fn channel ->
       request = %MutateRowRequest{
         table_name: Config.table_path(project_id, instance_id, table_id),
@@ -745,17 +745,18 @@ defmodule MegasPinakas do
   # Private Helpers
   # ============================================================================
 
+  # Calculates the exclusive end key for a prefix scan.
+  # Returns <<>> (empty binary) when all bytes are 0xFF, meaning "no upper bound"
+  # — the scan should read to the end of the table.
   defp calculate_prefix_end(prefix) when byte_size(prefix) == 0 do
     <<>>
   end
 
   defp calculate_prefix_end(prefix) do
-    # Get all bytes except the last
     prefix_size = byte_size(prefix) - 1
     <<head::binary-size(prefix_size), last_byte>> = prefix
 
     if last_byte == 255 do
-      # If last byte is 255, we need to increment the previous byte
       calculate_prefix_end(head)
     else
       <<head::binary, last_byte + 1>>
@@ -772,8 +773,15 @@ defmodule MegasPinakas do
     Enum.reduce(chunks, acc, &process_chunk/2)
   end
 
-  defp process_read_rows_chunk({:error, _reason}, acc), do: acc
-  defp process_read_rows_chunk(_, acc), do: acc
+  defp process_read_rows_chunk({:error, reason}, acc) do
+    Logger.warning("BigTable read_rows stream error: #{inspect(reason)}")
+    acc
+  end
+
+  defp process_read_rows_chunk(unexpected, acc) do
+    Logger.warning("BigTable read_rows unexpected chunk: #{inspect(unexpected)}")
+    acc
+  end
 
   defp process_chunk(chunk, {rows, current_row, current_cells}) do
     # Build cell data from chunk
@@ -812,38 +820,34 @@ defmodule MegasPinakas do
   end
 
   defp build_row(key, cells) do
-    families =
-      cells
-      |> Enum.reverse()
-      |> Enum.group_by(& &1.family)
-      |> Enum.map(fn {family, family_cells} ->
-        columns =
-          family_cells
-          |> Enum.group_by(& &1.qualifier)
-          |> Enum.map(fn {qualifier, qual_cells} ->
-            %Google.Bigtable.V2.Column{
-              qualifier: qualifier,
-              cells:
-                Enum.map(qual_cells, fn c ->
-                  %Google.Bigtable.V2.Cell{
-                    timestamp_micros: c.timestamp,
-                    value: c.value,
-                    labels: c.labels || []
-                  }
-                end)
-            }
-          end)
+    # Single-pass: group cells by {family, qualifier} while reversing
+    grouped =
+      Enum.reduce(cells, %{}, fn cell, acc ->
+        group_key = {cell.family, cell.qualifier}
 
-        %Google.Bigtable.V2.Family{
-          name: family,
-          columns: columns
+        bigtable_cell = %Google.Bigtable.V2.Cell{
+          timestamp_micros: cell.timestamp,
+          value: cell.value,
+          labels: cell.labels || []
         }
+
+        Map.update(acc, group_key, [bigtable_cell], &[bigtable_cell | &1])
       end)
 
-    %Row{
-      key: key,
-      families: families
-    }
+    # Build family/column hierarchy
+    families =
+      grouped
+      |> Enum.group_by(fn {{family, _qual}, _cells} -> family end)
+      |> Enum.map(fn {family, entries} ->
+        columns =
+          Enum.map(entries, fn {{_fam, qualifier}, col_cells} ->
+            %Google.Bigtable.V2.Column{qualifier: qualifier, cells: col_cells}
+          end)
+
+        %Google.Bigtable.V2.Family{name: family, columns: columns}
+      end)
+
+    %Row{key: key, families: families}
   end
 
   defp finalize_rows({rows, _current_row, _current_cells}) do
