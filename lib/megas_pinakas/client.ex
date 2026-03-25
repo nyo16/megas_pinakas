@@ -4,7 +4,12 @@ defmodule MegasPinakas.Client do
 
   This module wraps the GrpcConnectionPool to provide a simple interface
   for executing operations with automatic connection management.
+
+  All gRPC responses are normalized through `MegasPinakas.Response.format/1`,
+  converting raw gRPC errors into idiomatic `{:error, {status_atom, message}}` tuples.
   """
+
+  alias MegasPinakas.Response
 
   @default_pool MegasPinakas.ConnectionPool
 
@@ -42,7 +47,7 @@ defmodule MegasPinakas.Client do
     case GrpcConnectionPool.get_channel(pool_name) do
       {:ok, channel} ->
         try do
-          result = operation_fn.(channel)
+          result = operation_fn.(channel) |> Response.format()
           duration = System.monotonic_time() - start_time
           :telemetry.execute([:megas_pinakas, :request, :stop], %{duration: duration}, metadata)
           result
@@ -68,7 +73,7 @@ defmodule MegasPinakas.Client do
           Map.put(metadata, :reason, reason)
         )
 
-        {:error, reason}
+        {:error, {:pool_error, reason}}
     end
   end
 

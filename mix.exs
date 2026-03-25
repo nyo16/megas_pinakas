@@ -58,7 +58,8 @@ defmodule MegasPinakas.MixProject do
       groups_for_modules: [
         Core: [
           MegasPinakas,
-          MegasPinakas.Client
+          MegasPinakas.Client,
+          MegasPinakas.Response
         ],
         "High-Level APIs": [
           MegasPinakas.Cache,
