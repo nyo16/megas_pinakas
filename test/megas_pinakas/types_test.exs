@@ -1,8 +1,8 @@
 defmodule MegasPinakas.TypesTest do
   use ExUnit.Case, async: true
 
-  alias MegasPinakas.Types
   alias Google.Bigtable.V2.Mutation
+  alias MegasPinakas.Types
 
   describe "encode/2" do
     test "encodes binary as-is" do

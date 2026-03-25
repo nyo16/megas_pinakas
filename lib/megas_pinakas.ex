@@ -784,39 +784,42 @@ defmodule MegasPinakas do
   end
 
   defp process_chunk(chunk, {rows, current_row, current_cells}) do
-    # Build cell data from chunk
-    new_cells =
-      if chunk.value do
-        [
-          %{
-            family: chunk.family_name && chunk.family_name.value,
-            qualifier: chunk.qualifier && chunk.qualifier.value,
-            timestamp: chunk.timestamp_micros,
-            value: chunk.value,
-            labels: chunk.labels
-          }
-          | current_cells
-        ]
-      else
-        current_cells
-      end
+    new_cells = accumulate_cells(chunk, current_cells)
+    apply_row_status(chunk.row_status, chunk, rows, current_row, new_cells)
+  end
 
-    # row_status is a oneof field: {:commit_row, true} | {:reset_row, true} | nil
-    case chunk.row_status do
-      {:commit_row, true} ->
-        row_key = chunk.row_key || (current_row && current_row.key)
-        row = build_row(row_key, new_cells)
-        {[row | rows], nil, []}
+  defp accumulate_cells(%{value: nil}, current_cells), do: current_cells
 
-      {:reset_row, true} ->
-        # Reset current row, discard accumulated cells
-        {rows, nil, []}
+  defp accumulate_cells(%{value: _} = chunk, current_cells) do
+    [
+      %{
+        family: chunk.family_name && chunk.family_name.value,
+        qualifier: chunk.qualifier && chunk.qualifier.value,
+        timestamp: chunk.timestamp_micros,
+        value: chunk.value,
+        labels: chunk.labels
+      }
+      | current_cells
+    ]
+  end
 
-      _ ->
-        # Continue accumulating cells for current row
-        new_row = %{key: chunk.row_key || (current_row && current_row.key)}
-        {rows, new_row, new_cells}
-    end
+  defp apply_row_status({:commit_row, true}, chunk, rows, current_row, new_cells) do
+    row_key = resolve_row_key(chunk, current_row)
+    row = build_row(row_key, new_cells)
+    {[row | rows], nil, []}
+  end
+
+  defp apply_row_status({:reset_row, true}, _chunk, rows, _current_row, _new_cells) do
+    {rows, nil, []}
+  end
+
+  defp apply_row_status(_status, chunk, rows, current_row, new_cells) do
+    new_row = %{key: resolve_row_key(chunk, current_row)}
+    {rows, new_row, new_cells}
+  end
+
+  defp resolve_row_key(chunk, current_row) do
+    chunk.row_key || (current_row && current_row.key)
   end
 
   defp build_row(key, cells) do
@@ -874,19 +877,7 @@ defmodule MegasPinakas do
   @spec row_to_map(Row.t()) :: map()
   def row_to_map(%Row{families: families}) do
     Map.new(families, fn %{name: family_name, columns: columns} ->
-      column_map =
-        Map.new(columns, fn %{qualifier: qualifier, cells: cells} ->
-          # Get the most recent cell value (first cell, as they're sorted by timestamp desc)
-          value =
-            case cells do
-              [%{value: v} | _] -> v
-              [] -> nil
-            end
-
-          {qualifier, value}
-        end)
-
-      {family_name, column_map}
+      {family_name, columns_to_map(columns)}
     end)
   end
 
@@ -958,19 +949,8 @@ defmodule MegasPinakas do
   @spec get_family(Row.t() | nil, String.t()) :: map()
   def get_family(%Row{families: families}, family) do
     case Enum.find(families, &(&1.name == family)) do
-      %{columns: columns} ->
-        Map.new(columns, fn %{qualifier: qualifier, cells: cells} ->
-          value =
-            case cells do
-              [%{value: v} | _] -> v
-              [] -> nil
-            end
-
-          {qualifier, value}
-        end)
-
-      nil ->
-        %{}
+      %{columns: columns} -> columns_to_map(columns)
+      nil -> %{}
     end
   end
 
@@ -1011,4 +991,14 @@ defmodule MegasPinakas do
       %{key: row_key(row), data: row_to_map(row)}
     end)
   end
+
+  # Converts a list of columns to a map of qualifier => latest value
+  defp columns_to_map(columns) do
+    Map.new(columns, fn %{qualifier: qualifier, cells: cells} ->
+      {qualifier, latest_cell_value(cells)}
+    end)
+  end
+
+  defp latest_cell_value([%{value: v} | _]), do: v
+  defp latest_cell_value([]), do: nil
 end

@@ -30,7 +30,7 @@ defmodule MegasPinakas.Filter do
       ])
   """
 
-  alias Google.Bigtable.V2.{RowFilter, ColumnRange, TimestampRange, ValueRange}
+  alias Google.Bigtable.V2.{ColumnRange, RowFilter, TimestampRange, ValueRange}
 
   # ============================================================================
   # Limiting Filters - Row Level

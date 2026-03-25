@@ -30,8 +30,8 @@ defmodule MegasPinakas.TimeSeries do
   """
 
   alias MegasPinakas
-  alias MegasPinakas.Types
   alias MegasPinakas.Row
+  alias MegasPinakas.Types
 
   # Max timestamp for reverse ordering (year 2286 in microseconds)
   @max_timestamp 9_999_999_999_999_999

@@ -169,16 +169,7 @@ defmodule MegasPinakas.CounterTTL do
       {:ok, rows} ->
         total =
           Enum.reduce(rows, 0, fn row, acc ->
-            case MegasPinakas.get_cell(row, family, qualifier) do
-              nil ->
-                acc
-
-              value ->
-                case Types.decode(:integer, value) do
-                  {:ok, v} -> acc + v
-                  {:error, _} -> acc
-                end
-            end
+            acc + sum_counter_from_row(row, family, qualifier)
           end)
 
         {:ok, total}
@@ -307,7 +298,7 @@ defmodule MegasPinakas.CounterTTL do
       MegasPinakas.CounterTTL.build_row_key("user#123", :minute)
       # => "user#123#1704067200"
   """
-  @spec build_row_key(String.t(), atom(), integer()) :: String.t()
+  @spec build_row_key(String.t(), atom(), integer() | nil) :: String.t()
   def build_row_key(key, bucket, timestamp \\ nil) do
     ts = timestamp || System.system_time(:second)
     bucket_seconds = bucket_to_seconds(bucket)
@@ -349,7 +340,7 @@ defmodule MegasPinakas.CounterTTL do
   def bucket_to_seconds(:second), do: 1
   def bucket_to_seconds(:minute), do: 60
   def bucket_to_seconds(:hour), do: 3600
-  def bucket_to_seconds(:day), do: 86400
+  def bucket_to_seconds(:day), do: 86_400
   def bucket_to_seconds(:week), do: 604_800
 
   # ============================================================================
@@ -368,6 +359,19 @@ defmodule MegasPinakas.CounterTTL do
           Types.decode(:integer, value)
         else
           {:ok, nil}
+        end
+    end
+  end
+
+  defp sum_counter_from_row(row, family, qualifier) do
+    case MegasPinakas.get_cell(row, family, qualifier) do
+      nil ->
+        0
+
+      value ->
+        case Types.decode(:integer, value) do
+          {:ok, v} -> v
+          {:error, _} -> 0
         end
     end
   end

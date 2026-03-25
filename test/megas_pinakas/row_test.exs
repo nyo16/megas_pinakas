@@ -1,9 +1,9 @@
 defmodule MegasPinakas.RowTest do
   use ExUnit.Case, async: true
 
+  alias Google.Bigtable.V2.Mutation
   alias MegasPinakas.Row
   alias MegasPinakas.Types
-  alias Google.Bigtable.V2.Mutation
 
   describe "new/1" do
     test "creates a row with the given key" do

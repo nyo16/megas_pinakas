@@ -237,22 +237,22 @@ defmodule MegasPinakasTest do
 
   # Helper to build test rows
   defp build_test_row(key, families_data) do
-    families =
-      Enum.map(families_data, fn {family_name, columns_data} ->
-        columns =
-          Enum.map(columns_data, fn {qualifier, cells_data} ->
-            cells =
-              Enum.map(cells_data, fn {value, timestamp} ->
-                %Cell{value: value, timestamp_micros: timestamp, labels: []}
-              end)
+    families = Enum.map(families_data, &build_test_family/1)
+    %Row{key: key, families: families}
+  end
 
-            %Column{qualifier: qualifier, cells: cells}
-          end)
+  defp build_test_family({family_name, columns_data}) do
+    columns = Enum.map(columns_data, &build_test_column/1)
+    %Family{name: family_name, columns: columns}
+  end
 
-        %Family{name: family_name, columns: columns}
+  defp build_test_column({qualifier, cells_data}) do
+    cells =
+      Enum.map(cells_data, fn {value, timestamp} ->
+        %Cell{value: value, timestamp_micros: timestamp, labels: []}
       end)
 
-    %Row{key: key, families: families}
+    %Column{qualifier: qualifier, cells: cells}
   end
 
   describe "row_to_map/1" do

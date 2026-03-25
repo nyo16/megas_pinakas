@@ -33,8 +33,8 @@ defmodule MegasPinakas.Types do
       ])
   """
 
-  alias MegasPinakas
   alias Google.Bigtable.V2.Mutation
+  alias MegasPinakas
 
   # ============================================================================
   # Encoding/Decoding Helpers
@@ -129,11 +129,9 @@ defmodule MegasPinakas.Types do
   def decode(:datetime, _), do: {:error, :invalid_datetime_format}
 
   def decode(:term, value) when is_binary(value) do
-    try do
-      {:ok, :erlang.binary_to_term(value, [:safe])}
-    rescue
-      ArgumentError -> {:error, :invalid_term_format}
-    end
+    {:ok, :erlang.binary_to_term(value, [:safe])}
+  rescue
+    ArgumentError -> {:error, :invalid_term_format}
   end
 
   @doc """
@@ -594,18 +592,7 @@ defmodule MegasPinakas.Types do
           |> Enum.map(fn {type, family, qualifier} ->
             key = "#{family}:#{qualifier}"
             raw_value = MegasPinakas.get_cell(row, family, qualifier)
-
-            decoded_value =
-              if raw_value do
-                case decode(type, raw_value) do
-                  {:ok, v} -> v
-                  {:error, _} -> nil
-                end
-              else
-                nil
-              end
-
-            {key, decoded_value}
+            {key, decode_cell_value(type, raw_value)}
           end)
           |> Map.new()
 
@@ -619,6 +606,15 @@ defmodule MegasPinakas.Types do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp decode_cell_value(_type, nil), do: nil
+
+  defp decode_cell_value(type, raw_value) do
+    case decode(type, raw_value) do
+      {:ok, v} -> v
+      {:error, _} -> nil
+    end
+  end
 
   defp read_cell_as(project, instance, table, row_key, family, qualifier, type, opts) do
     case MegasPinakas.read_row(project, instance, table, row_key, opts) do

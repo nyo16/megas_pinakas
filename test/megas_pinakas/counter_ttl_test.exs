@@ -16,8 +16,8 @@ defmodule MegasPinakas.CounterTTLTest do
       assert CounterTTL.bucket_to_seconds(:hour) == 3600
     end
 
-    test "converts :day to 86400" do
-      assert CounterTTL.bucket_to_seconds(:day) == 86400
+    test "converts :day to 86_400" do
+      assert CounterTTL.bucket_to_seconds(:day) == 86_400
     end
 
     test "converts :week to 604800" do

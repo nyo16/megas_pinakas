@@ -1,8 +1,8 @@
 defmodule MegasPinakas.AdminTest do
   use ExUnit.Case, async: true
 
-  alias MegasPinakas.Admin
   alias Google.Bigtable.Admin.V2.{ColumnFamily, GcRule, ModifyColumnFamiliesRequest}
+  alias MegasPinakas.Admin
 
   describe "GC rule builders" do
     test "max_versions_gc_rule/1 creates a max versions rule" do
@@ -12,16 +12,16 @@ defmodule MegasPinakas.AdminTest do
     end
 
     test "max_age_gc_rule/1 creates a max age rule" do
-      rule = Admin.max_age_gc_rule(86400)
+      rule = Admin.max_age_gc_rule(86_400)
 
       assert %GcRule{rule: {:max_age, duration}} = rule
-      assert duration.seconds == 86400
+      assert duration.seconds == 86_400
       assert duration.nanos == 0
     end
 
     test "intersection_gc_rule/1 combines rules with AND logic" do
       rule1 = Admin.max_versions_gc_rule(3)
-      rule2 = Admin.max_age_gc_rule(86400)
+      rule2 = Admin.max_age_gc_rule(86_400)
 
       combined = Admin.intersection_gc_rule([rule1, rule2])
 

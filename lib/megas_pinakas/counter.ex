@@ -350,21 +350,19 @@ defmodule MegasPinakas.Counter do
           Enum.reduce(counters, %{}, fn {family, qualifier, _amount}, acc ->
             key = "#{family}:#{qualifier}"
             value = MegasPinakas.get_cell(row, family, qualifier)
-
-            decoded =
-              if value do
-                case Types.decode(:integer, value) do
-                  {:ok, v} -> v
-                  {:error, _} -> nil
-                end
-              else
-                nil
-              end
-
-            Map.put(acc, key, decoded)
+            Map.put(acc, key, decode_integer_value(value))
           end)
 
         {:ok, results}
+    end
+  end
+
+  defp decode_integer_value(nil), do: nil
+
+  defp decode_integer_value(value) do
+    case Types.decode(:integer, value) do
+      {:ok, v} -> v
+      {:error, _} -> nil
     end
   end
 end

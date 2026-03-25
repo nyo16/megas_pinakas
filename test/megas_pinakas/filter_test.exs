@@ -1,8 +1,8 @@
 defmodule MegasPinakas.FilterTest do
   use ExUnit.Case, async: true
 
+  alias Google.Bigtable.V2.{ColumnRange, RowFilter, TimestampRange, ValueRange}
   alias MegasPinakas.Filter
-  alias Google.Bigtable.V2.{RowFilter, ColumnRange, TimestampRange, ValueRange}
 
   # ============================================================================
   # Row Level Filters

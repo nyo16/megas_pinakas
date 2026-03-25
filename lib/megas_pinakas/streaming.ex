@@ -291,14 +291,8 @@ defmodule MegasPinakas.Streaming do
       {:ok, []} ->
         {:halt, %{state | done: true}}
 
-      {:ok, rows} ->
-        case rows do
-          [first | rest] ->
-            {[first], %{state | buffer: rest, last_key: MegasPinakas.row_key(first)}}
-
-          [] ->
-            {:halt, %{state | done: true}}
-        end
+      {:ok, [first | rest]} ->
+        {[first], %{state | buffer: rest, last_key: MegasPinakas.row_key(first)}}
 
       {:error, reason} ->
         Logger.warning("BigTable stream pagination error: #{inspect(reason)}")

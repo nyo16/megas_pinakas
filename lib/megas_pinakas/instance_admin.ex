@@ -9,8 +9,8 @@ defmodule MegasPinakas.InstanceAdmin do
   alias MegasPinakas.{Auth, Client, Config}
 
   alias Google.Bigtable.Admin.V2.{
-    BigtableInstanceAdmin.Stub,
     AppProfile,
+    BigtableInstanceAdmin.Stub,
     Cluster,
     CreateAppProfileRequest,
     CreateClusterRequest,

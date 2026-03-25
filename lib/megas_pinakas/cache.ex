@@ -26,9 +26,9 @@ defmodule MegasPinakas.Cache do
   """
 
   alias MegasPinakas
-  alias MegasPinakas.Types
-  alias MegasPinakas.Row
   alias MegasPinakas.Batch
+  alias MegasPinakas.Row
+  alias MegasPinakas.Types
 
   @default_family "cache"
   @default_qualifier "value"
@@ -160,18 +160,7 @@ defmodule MegasPinakas.Cache do
           |> Enum.map(fn row ->
             key = MegasPinakas.row_key(row)
             raw_value = MegasPinakas.get_cell(row, family, qualifier)
-
-            value =
-              if raw_value do
-                case Types.decode(:json, raw_value) do
-                  {:ok, v} -> v
-                  {:error, _} -> nil
-                end
-              else
-                nil
-              end
-
-            {key, value}
+            {key, decode_json_value(raw_value)}
           end)
           |> Map.new()
 
@@ -318,6 +307,15 @@ defmodule MegasPinakas.Cache do
       row ->
         value = MegasPinakas.get_cell(row, family, qualifier)
         {:ok, value}
+    end
+  end
+
+  defp decode_json_value(nil), do: nil
+
+  defp decode_json_value(raw_value) do
+    case Types.decode(:json, raw_value) do
+      {:ok, v} -> v
+      {:error, _} -> nil
     end
   end
 end
