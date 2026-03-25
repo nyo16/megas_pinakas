@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-03-25
+
+### Breaking Changes
+- `Client.execute/2` no longer double-wraps responses — returns `{:ok, val}` instead of `{:ok, {:ok, val}}`
+- `read_rows/4` now returns assembled `{:ok, [Row.t()]}` instead of raw gRPC stream `{:ok, Enumerable.t()}`
+- gRPC errors now return `{:error, {:not_found, msg}}` instead of `{:error, %GRPC.RPCError{status: 5, message: msg}}`
+- Pool errors now return `{:error, {:pool_error, reason}}` instead of `{:error, reason}`
+- `Client.with_connection/2` removed (was alias for `execute/2`)
+- `Auth.request_opts/0` now includes `:timeout` key in all environments
+
+### Added
+- `MegasPinakas.Response` — normalizes gRPC responses into idiomatic `{:ok, result} | {:error, {atom, msg}}` tuples, mapping all 17 gRPC status codes to descriptive atoms
+- Configurable gRPC timeout (default 30s) via `Config.default_timeout/0` and `:default_timeout` app config
+- Telemetry events: `[:megas_pinakas, :request, :start | :stop | :exception]` with duration and pool metadata
+- GitHub Actions CI pipeline — compile, format, credo, test, dialyzer, auto-publish to hex on version tags
+- Guard clauses on `mutate_row/6` and `read_row/5`
+
+### Fixed
+- Silent error swallowing in `collect_read_rows_stream` and `Streaming.next_rows` — errors now logged via `Logger.warning`
+- Auth fallback silently returning empty opts on token failure — now logs warning
+- Auth rescue catching all exceptions — now catches specific `ErlangError` for missing gcloud
+- Supervisor strategy changed from `:one_for_one` to `:rest_for_one` so connection pool restarts when gRPC supervisor crashes
+- `build_row_key/3` typespec accepting `nil` timestamp parameter
+- Unreachable empty list match in streaming pagination
+
+### Changed
+- Upgraded `grpc_connection_pool` 0.2.1 → 0.3.0
+- Optimized `build_row` with single-pass grouping (eliminates multiple `Enum.reverse` + `Enum.group_by` passes)
+- Extracted `build_routing_policy/2` helper in `InstanceAdmin` (removed 30 lines duplication)
+- Decomposed `process_chunk` into `accumulate_cells`/`apply_row_status`/`resolve_row_key`
+- Extracted `columns_to_map`/`latest_cell_value` from `row_to_map`/`get_family`
+- Extracted helpers in cache, counter, counter_ttl, types to reduce nesting depth
+- Fixed doc groups: replaced phantom `MegasPinakas.Connection` with `MegasPinakas.Client`
+- All aliases sorted alphabetically, all large numbers use underscores
+- Added `credo` and `dialyxir` as dev/test dependencies
+- Full codebase formatted
+
 ## [0.5.0] - 2024-12-09
 
 ### Added
@@ -86,4 +123,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for BigTable emulator and production (via Goth)
 - Configurable pool size and timeouts
 
+[0.6.0]: https://github.com/nyo16/megas_pinakas/releases/tag/v0.6.0
 [0.5.0]: https://github.com/nyo16/megas_pinakas/releases/tag/v0.5.0
