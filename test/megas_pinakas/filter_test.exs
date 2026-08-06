@@ -32,7 +32,7 @@ defmodule MegasPinakas.FilterTest do
     test "accepts 0.0 probability" do
       filter = Filter.row_sample_filter(0.0)
 
-      assert %RowFilter{filter: {:row_sample_filter, 0.0}} = filter
+      assert %RowFilter{filter: {:row_sample_filter, +0.0}} = filter
     end
 
     test "accepts 1.0 probability" do

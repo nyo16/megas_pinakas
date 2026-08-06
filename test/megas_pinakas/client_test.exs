@@ -10,13 +10,22 @@ defmodule MegasPinakas.ClientTest do
   end
 
   describe "execute/2" do
-    test "raises ArgumentError when pool registry doesn't exist" do
+    test "returns a pool error when the pool is not started" do
       operation = fn _channel -> :ok end
 
-      # GrpcConnectionPool raises ArgumentError when registry doesn't exist
-      assert_raise ArgumentError, fn ->
-        Client.execute(operation, pool: :nonexistent_pool)
-      end
+      # Since grpc_connection_pool 0.3.5, get_channel/1 returns
+      # {:error, :not_connected} rather than raising when the pool is missing.
+      assert Client.execute(operation, pool: :nonexistent_pool) ==
+               {:error, {:pool_error, :not_connected}}
+    end
+
+    test "does not invoke the operation when no channel is available" do
+      parent = self()
+      operation = fn _channel -> send(parent, :operation_ran) end
+
+      Client.execute(operation, pool: :nonexistent_pool)
+
+      refute_received :operation_ran
     end
   end
 
@@ -24,10 +33,11 @@ defmodule MegasPinakas.ClientTest do
     test "raises when pool is not started" do
       operation = fn _channel -> :ok end
 
-      # Can raise either ArgumentError (registry not found) or RuntimeError (our wrapper)
-      assert_raise ArgumentError, fn ->
-        Client.execute!(operation, pool: :nonexistent_pool)
-      end
+      assert_raise RuntimeError,
+                   "BigTable operation failed: {:pool_error, :not_connected}",
+                   fn ->
+                     Client.execute!(operation, pool: :nonexistent_pool)
+                   end
     end
   end
 

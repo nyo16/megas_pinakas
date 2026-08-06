@@ -96,16 +96,25 @@ defmodule MegasPinakas.TimeSeries do
   @doc """
   Writes multiple data points in a batch.
 
+  Returns one result per point, ordered to match `points`. `{:ok, results}` means
+  the RPC succeeded, **not** that every point was written — check
+  `&1.status.code == 0` per entry.
+
   ## Examples
 
       points = [
         %{metric_id: "cpu:server1", value: 0.85, timestamp: ~U[2024-01-15 10:00:00Z]},
         %{metric_id: "cpu:server2", value: 0.92, timestamp: ~U[2024-01-15 10:00:00Z]}
       ]
-      MegasPinakas.TimeSeries.write_points(project, instance, "metrics", points)
+      {:ok, results} = MegasPinakas.TimeSeries.write_points(project, instance, "metrics", points)
+
+  > #### Breaking change in 0.6.0 {: .warning}
+  >
+  > Previously returned an unconsumed `#Stream<>`, so failed writes were silently
+  > discarded unless the caller enumerated it.
   """
   @spec write_points(String.t(), String.t(), String.t(), [map()], keyword()) ::
-          {:ok, term()} | {:error, term()}
+          {:ok, [Google.Bigtable.V2.MutateRowsResponse.Entry.t()]} | {:error, term()}
   def write_points(project, instance, table, points, opts \\ []) when is_list(points) do
     family = Keyword.get(opts, :family, @default_family)
 
