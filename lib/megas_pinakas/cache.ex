@@ -208,12 +208,21 @@ defmodule MegasPinakas.Cache do
   @doc """
   Deletes multiple cached values.
 
+  Returns one result per key, ordered to match `keys`. `{:ok, results}` means the
+  RPC succeeded, **not** that every key was deleted — check `&1.status.code == 0`
+  per entry.
+
   ## Examples
 
-      {:ok, _} = MegasPinakas.Cache.delete_many(project, instance, "cache", ["key1", "key2"])
+      {:ok, results} = MegasPinakas.Cache.delete_many(project, instance, "cache", ["key1", "key2"])
+
+  > #### Breaking change in 0.6.0 {: .warning}
+  >
+  > Previously returned an unconsumed `#Stream<>`, so failed deletes were silently
+  > discarded unless the caller enumerated it.
   """
   @spec delete_many(String.t(), String.t(), String.t(), [String.t()], keyword()) ::
-          {:ok, term()} | {:error, term()}
+          {:ok, [Google.Bigtable.V2.MutateRowsResponse.Entry.t()]} | {:error, term()}
   def delete_many(project, instance, table, keys, opts \\ []) when is_list(keys) do
     family = Keyword.get(opts, :family, @default_family)
     qualifier = Keyword.get(opts, :qualifier, @default_qualifier)

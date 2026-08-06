@@ -9,7 +9,7 @@ Add `megas_pinakas` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:megas_pinakas, "~> 0.5.0"}
+    {:megas_pinakas, "~> 0.6.0"}
   ]
 end
 ```
@@ -43,13 +43,24 @@ export BIGTABLE_EMULATOR_HOST=localhost:8086
 
 ### Production with Goth Authentication
 
+**Goth is the required setup for production.** MegasPinakas has three token
+sources — Goth, a custom `:token_source`, and a gcloud CLI fallback — and the
+gcloud fallback is **disabled in production builds**. It shells out to
+`gcloud auth application-default print-access-token`, which was measured at
+0.85–1.11 s per call and needs an interactive login, so it exists only for local
+development. If you deploy without configuring Goth (or a `:token_source`),
+requests will be made unauthenticated and rejected.
+
+Tokens are cached by `MegasPinakas.Auth.Cache`, so a warm `request_opts/0` is a
+lock-free ETS read (~270 ns) rather than a token fetch per RPC.
+
 For production, use [Goth](https://github.com/peburrows/goth) for Google Cloud authentication:
 
 ```elixir
 # Add to dependencies in mix.exs
 def deps do
   [
-    {:megas_pinakas, "~> 0.5.0"},
+    {:megas_pinakas, "~> 0.6.0"},
     {:goth, "~> 1.4"}
   ]
 end
@@ -104,6 +115,36 @@ config :megas_pinakas, :goth, MegasPinakas.Goth
 config :megas_pinakas, :default_pool_size, 10
 ```
 
+### Custom token sources
+
+If Goth does not fit your setup (workload identity federation, a shared token
+broker, a vault), provide your own source. It must return the token with its
+scheme included, since the value is used verbatim as `authorization` metadata:
+
+```elixir
+config :megas_pinakas, :token_source, {MyApp.Auth, :bigtable_token, []}
+
+# @spec bigtable_token() ::
+#         {:ok, %{token: String.t(), expires_at: non_neg_integer()}} | {:error, term()}
+def bigtable_token do
+  {:ok, %{token: "Bearer " <> jwt, expires_at: unix_seconds}}
+end
+```
+
+`expires_at` is an absolute Unix timestamp in seconds. `MegasPinakas.Auth.Cache`
+refreshes once fewer than 60 seconds remain, and collapses concurrent refreshes
+so N callers hitting expiry together cost one fetch, not N.
+
+### Re-enabling the gcloud fallback
+
+Only if you genuinely need it in a production build:
+
+```elixir
+config :megas_pinakas, :allow_gcloud_auth_fallback, true
+```
+
+Every use logs a warning. Expect ~1 s per token refresh.
+
 ## Usage
 
 ### Data Operations
@@ -121,16 +162,18 @@ mutations = [
 
 # Read multiple rows with filter
 filter = MegasPinakas.family_filter("cf")
-{:ok, stream} = MegasPinakas.read_rows("project", "instance", "users",
+{:ok, rows} = MegasPinakas.read_rows("project", "instance", "users",
   rows: MegasPinakas.row_set(["user#1", "user#2", "user#3"]),
   filter: filter)
 
-# Batch mutations
+# Batch mutations. MutateRows is partial-success: {:ok, results} means the RPC
+# succeeded, not that every row applied — check each entry's status.
 entries = [
   %{row_key: "row1", mutations: [MegasPinakas.set_cell("cf", "col", "val1")]},
   %{row_key: "row2", mutations: [MegasPinakas.set_cell("cf", "col", "val2")]}
 ]
-{:ok, stream} = MegasPinakas.mutate_rows("project", "instance", "table", entries)
+{:ok, results} = MegasPinakas.mutate_rows("project", "instance", "table", entries)
+failed = Enum.reject(results, &(&1.status.code == 0))
 
 # Atomic increment
 rules = [MegasPinakas.increment_rule("cf", "counter", 1)]
@@ -579,9 +622,47 @@ TimeSeries.write_points(project, instance, "metrics", [
   ~U[2024-01-01 00:00:00Z], ~U[2024-01-02 00:00:00Z])
 ```
 
+## Eager reads vs streaming
+
+`read_rows/4` is **eager**: it assembles every matching row into a list before
+returning. That is the right shape for a bounded read — a key set, a narrow
+range, anything with a `:rows_limit`.
+
+It is the wrong shape for a large scan. `read_rows(p, i, "big_table")` with no
+`:rows` and no `:rows_limit` materializes the whole table (~3.4 KB per row in our
+benchmark fixture, so 1 M rows is several GB). Two ways to avoid that:
+
+```elixir
+# 1. Cap it — turns an accidental full-table read into an error, not an OOM.
+#    Costs one row beyond the cap, not a full scan.
+case MegasPinakas.read_rows(project, instance, "events", max_rows: 100_000) do
+  {:ok, rows} -> rows
+  {:error, :result_too_large} -> :too_big
+end
+
+# 2. Stream it — memory bounded by :batch_size, not by result size.
+MegasPinakas.Streaming.stream_prefix(project, instance, "events", "2026-08-")
+|> Stream.map(&MegasPinakas.row_to_map/1)
+|> Enum.reduce(0, fn _row, n -> n + 1 end)
+```
+
+The same applies to helpers built on `read_rows/4` — notably `Cache.get_many/5`
+and `CounterTTL.get_window/7`, which are bounded by the keys or window you pass.
+
 ## Streaming
 
-Memory-efficient streaming with `Stream.resource`:
+Memory-efficient streaming with `Stream.resource`.
+
+Rows are fetched in batches as you consume them, so memory is bounded by
+`:batch_size` (default `10_000`) rather than by the size of the result set.
+`:batch_size` trades round trips against peak memory: each batch is fetched in
+full before its rows are yielded. Lower it when rows are large or you expect to
+stop early; raise it for long scans.
+
+Streams emit `[:megas_pinakas, :stream, :start]` on first demand, then exactly
+one of `:stop` (ran to exhaustion) or `:cancelled` (consumer stopped early). A
+mid-stream failure raises `MegasPinakas.StreamError` rather than halting quietly,
+so partial results are never mistaken for a complete read.
 
 ```elixir
 alias MegasPinakas.Streaming
@@ -610,6 +691,14 @@ Streaming.stream_in_chunks(project, instance, "logs",
   process_fn: fn chunk -> process_batch(chunk) end
 )
 |> Enum.sum()
+
+# Cap the total rows a stream will yield
+Streaming.stream_prefix(project, instance, "users", "user#", rows_limit: 500)
+|> Enum.to_list()
+
+# Trade round trips against peak memory
+Streaming.stream_prefix(project, instance, "wide_rows", "k#", batch_size: 100)
+|> Enum.each(&process_row/1)
 
 # Utilities
 count = Streaming.count_rows(project, instance, "users", rows: row_set)

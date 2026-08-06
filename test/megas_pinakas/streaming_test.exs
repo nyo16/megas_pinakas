@@ -1,62 +1,95 @@
 defmodule MegasPinakas.StreamingTest do
-  use ExUnit.Case, async: true
+  # Not async: the laziness tests below assert that *no*
+  # [:megas_pinakas, :request, :start] event fires. Telemetry handlers are global,
+  # so a concurrently running test that issues any RPC would trip that assertion.
+  use ExUnit.Case, async: false
 
   alias MegasPinakas.Streaming
 
+  # Each constructor must return a lazy enumerable, not a materialized list.
+  #
+  # The two shapes below are the only ones the implementation can legitimately
+  # produce: `Stream.resource/3` returns a reducer function, while anything
+  # composed with `Stream.map/2` and friends returns a `%Stream{}` struct.
+  # A materialized result resolves to `Enumerable.List`, so this check fails
+  # loudly if laziness is ever lost.
+  #
+  # The previous `assert Enumerable.impl_for(stream) != nil` compared disjoint
+  # types and passed regardless of what the function returned.
+  @lazy_impls [Enumerable.Stream, Enumerable.Function]
+
+  defp assert_lazy(stream) do
+    refute is_list(stream), "expected a lazy enumerable, got a materialized list"
+    assert Enumerable.impl_for(stream) in @lazy_impls
+  end
+
   describe "stream_rows/4" do
-    test "returns an Enumerable" do
-      stream = Streaming.stream_rows("proj", "inst", "table")
-
-      # Stream.resource returns a struct that implements Enumerable
-      assert Enumerable.impl_for(stream) != nil
-    end
-
-    test "stream is lazy" do
-      # Creating the stream shouldn't make any calls
-      _stream = Streaming.stream_rows("proj", "inst", "table")
-
-      # No assertions needed - if it doesn't crash, it's lazy
-      assert true
+    test "returns a lazy enumerable" do
+      assert_lazy(Streaming.stream_rows("proj", "inst", "table"))
     end
   end
 
   describe "stream_rows_as_maps/4" do
-    test "returns an Enumerable" do
-      stream = Streaming.stream_rows_as_maps("proj", "inst", "table")
-
-      assert Enumerable.impl_for(stream) != nil
+    test "returns a lazy enumerable" do
+      assert_lazy(Streaming.stream_rows_as_maps("proj", "inst", "table"))
     end
   end
 
   describe "stream_rows_with_keys/4" do
-    test "returns an Enumerable" do
-      stream = Streaming.stream_rows_with_keys("proj", "inst", "table")
-
-      assert Enumerable.impl_for(stream) != nil
+    test "returns a lazy enumerable" do
+      assert_lazy(Streaming.stream_rows_with_keys("proj", "inst", "table"))
     end
   end
 
   describe "stream_range/6" do
-    test "returns an Enumerable" do
-      stream = Streaming.stream_range("proj", "inst", "table", "a", "z")
-
-      assert Enumerable.impl_for(stream) != nil
+    test "returns a lazy enumerable" do
+      assert_lazy(Streaming.stream_range("proj", "inst", "table", "a", "z"))
     end
   end
 
   describe "stream_prefix/5" do
-    test "returns an Enumerable" do
-      stream = Streaming.stream_prefix("proj", "inst", "table", "user#")
-
-      assert Enumerable.impl_for(stream) != nil
+    test "returns a lazy enumerable" do
+      assert_lazy(Streaming.stream_prefix("proj", "inst", "table", "user#"))
     end
   end
 
   describe "stream_in_chunks/5" do
-    test "returns an Enumerable" do
-      stream = Streaming.stream_in_chunks("proj", "inst", "table", [], chunk_size: 100)
+    test "returns a lazy enumerable" do
+      assert_lazy(Streaming.stream_in_chunks("proj", "inst", "table", [], chunk_size: 100))
+    end
+  end
 
-      assert Enumerable.impl_for(stream) != nil
+  describe "laziness" do
+    setup do
+      handler_id = {__MODULE__, System.unique_integer([:positive])}
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:megas_pinakas, :request, :start],
+        fn _event, _measurements, _metadata, _config -> send(test_pid, :request_started) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+      :ok
+    end
+
+    test "constructing a stream issues no request" do
+      _stream = Streaming.stream_rows("proj", "inst", "table")
+      _stream = Streaming.stream_prefix("proj", "inst", "table", "user#")
+      _stream = Streaming.stream_range("proj", "inst", "table", "a", "z")
+
+      refute_received :request_started
+    end
+
+    test "composing Stream operations issues no request" do
+      Streaming.stream_rows("proj", "inst", "table")
+      |> Stream.map(& &1)
+      |> Stream.filter(fn _ -> true end)
+      |> Stream.take(10)
+
+      refute_received :request_started
     end
   end
 

@@ -123,15 +123,26 @@ defmodule MegasPinakas.Batch do
   @doc """
   Executes the batch mutation against BigTable.
 
-  Returns a list of results, one for each row in the batch. Each result
-  indicates whether the mutation for that row succeeded or failed.
+  Returns a list of results, one for each row in the batch, ordered to match
+  insertion order.
+
+  `{:ok, results}` means the RPC succeeded, **not** that every row was written —
+  `MutateRows` is partial-success, so check each entry:
+
+      {:ok, results} = batch |> MegasPinakas.Batch.write(project, instance, "users")
+      failed = Enum.reject(results, &(&1.status.code == 0))
 
   ## Examples
 
       {:ok, results} = batch |> MegasPinakas.Batch.write(project, instance, "users")
+
+  > #### Breaking change in 0.6.0 {: .warning}
+  >
+  > Previously returned an unconsumed `#Stream<>` from `MegasPinakas.mutate_rows/5`,
+  > so per-row failures were silently discarded unless the caller enumerated it.
   """
   @spec write(t(), String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, term()} | {:error, term()}
+          {:ok, [Google.Bigtable.V2.MutateRowsResponse.Entry.t()]} | {:error, term()}
   def write(%__MODULE__{entries: entries}, project, instance, table, opts \\ []) do
     # Reverse to maintain insertion order
     MegasPinakas.mutate_rows(project, instance, table, Enum.reverse(entries), opts)

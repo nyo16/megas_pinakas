@@ -28,11 +28,35 @@ defmodule MegasPinakas do
       # Write a row
       mutations = [MegasPinakas.set_cell("cf", "col", "value")]
       {:ok, _} = MegasPinakas.mutate_row("my-project", "my-instance", "my-table", "row-key", mutations)
+
+  ## Eager reads vs streaming
+
+  `read_rows/4` is **eager**: it assembles every matching row into a list before
+  returning. That is the right shape for bounded reads — a key set, a narrow
+  range, anything with a `:rows_limit` — and it is what makes the returned value
+  a plain list you can pattern-match.
+
+  It is the wrong shape for a large scan. `read_rows(p, i, "big_table")` with no
+  `:rows` and no `:rows_limit` materializes the whole table. Pass `:max_rows` to
+  turn that into `{:error, :result_too_large}` rather than an out-of-memory crash.
+
+  For large or open-ended scans use `MegasPinakas.Streaming`, which fetches in
+  batches as you consume and bounds memory by `:batch_size`:
+
+      # Bounded — fine eagerly
+      {:ok, rows} = MegasPinakas.read_rows(p, i, "users", rows: MegasPinakas.row_set(keys))
+
+      # Unbounded — stream it
+      MegasPinakas.Streaming.stream_prefix(p, i, "events", "2026-08-")
+      |> Stream.map(&MegasPinakas.row_to_map/1)
+      |> Enum.reduce(0, fn _row, n -> n + 1 end)
+
+  The same applies to helpers built on `read_rows/4`, notably
+  `MegasPinakas.Cache.get_many/5` and `MegasPinakas.CounterTTL.get_window/7`:
+  they are bounded by the keys or window you pass in, so keep those bounded.
   """
 
-  alias MegasPinakas.{Auth, Client, Config}
-
-  require Logger
+  alias MegasPinakas.{Auth, Client, Config, RowAssembler}
 
   # Aliases for protobuf modules
   alias Google.Bigtable.V2.{
@@ -42,18 +66,21 @@ defmodule MegasPinakas do
     MutateRowRequest,
     MutateRowResponse,
     MutateRowsRequest,
+    MutateRowsResponse,
     Mutation,
     ReadModifyWriteRowRequest,
     ReadModifyWriteRowResponse,
     ReadModifyWriteRule,
     ReadRowsRequest,
-    ReadRowsResponse,
     Row,
     RowFilter,
     RowRange,
     RowSet,
-    SampleRowKeysRequest
+    SampleRowKeysRequest,
+    SampleRowKeysResponse
   }
+
+  require Logger
 
   # ============================================================================
   # Read Operations
@@ -64,11 +91,27 @@ defmodule MegasPinakas do
 
   Returns a list of assembled rows matching the request criteria.
 
+  ## This function is eager
+
+  Every matching row is assembled into memory before this returns. With no
+  `:rows_limit` and no `:rows`, `read_rows(p, i, "big_table")` materializes the
+  **entire table** — roughly 3.4 KB per row in the benchmark fixture, so 1 M rows
+  is several gigabytes.
+
+  For large or unbounded scans use `MegasPinakas.Streaming.stream_rows/4`, which
+  bounds memory by `:batch_size` instead of by the size of the result set. Use
+  `:max_rows` below to turn an accidental full-table read into an error rather
+  than an out-of-memory crash.
+
   ## Options
 
     * `:rows` - A `RowSet` specifying which rows to read
     * `:filter` - A `RowFilter` to apply
     * `:rows_limit` - Maximum number of rows to return
+    * `:max_rows` - Safety cap (default `:infinity`). When the result would exceed
+      it, returns `{:error, :result_too_large}` instead of a list. Implemented by
+      asking the server for at most `max_rows + 1` rows, so exceeding the cap
+      costs one extra row, not a full scan.
     * `:app_profile_id` - App profile to use
 
   ## Examples
@@ -83,31 +126,61 @@ defmodule MegasPinakas do
       # Read with filter
       {:ok, rows} = MegasPinakas.read_rows("project", "instance", "table",
         filter: MegasPinakas.column_filter("cf", "col"))
+
+      # Refuse to materialize more than 100k rows
+      case MegasPinakas.read_rows("project", "instance", "table", max_rows: 100_000) do
+        {:ok, rows} -> rows
+        {:error, :result_too_large} -> :use_streaming_instead
+      end
   """
   @spec read_rows(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, [Row.t()]} | {:error, term()}
   def read_rows(project_id, instance_id, table_id, opts \\ []) do
+    max_rows = Keyword.get(opts, :max_rows, :infinity)
+
     operation = fn channel ->
       request = %ReadRowsRequest{
         table_name: Config.table_path(project_id, instance_id, table_id),
         app_profile_id: Keyword.get(opts, :app_profile_id, ""),
         rows: Keyword.get(opts, :rows),
         filter: Keyword.get(opts, :filter),
-        rows_limit: Keyword.get(opts, :rows_limit, 0),
+        rows_limit: effective_rows_limit(Keyword.get(opts, :rows_limit, 0), max_rows),
         request_stats_view: :REQUEST_STATS_VIEW_UNSPECIFIED
       }
 
       auth_opts = Auth.request_opts()
-      Stub.read_rows(channel, request, auth_opts)
+
+      # Collect inside the operation, not after Client.execute/2 returns, so the
+      # `[:megas_pinakas, :request, :*]` span and the `rescue` in Client.execute/2
+      # both cover stream consumption. Consuming afterwards reported only the time
+      # to obtain the stream handle — 12% of the real duration at 10k rows — and
+      # let consumption exceptions escape uncaught after a *success* :stop event.
+      # `with` passes a non-matching value straight through, so RPC errors and
+      # assembly errors both surface unchanged.
+      with {:ok, stream} <- Stub.read_rows(channel, request, auth_opts),
+           {:ok, rows} <- RowAssembler.reduce_all(stream) do
+        enforce_max_rows(rows, max_rows)
+      end
     end
 
-    case Client.execute(operation) do
-      {:ok, stream} ->
-        {:ok, collect_read_rows_stream(stream)}
+    Client.execute(operation)
+  end
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+  # Asks the server for one row beyond the cap. That extra row is what makes the
+  # overflow detectable, and asking for it is what keeps the cap cheap — the
+  # server stops there instead of streaming a whole table we would then discard.
+  defp effective_rows_limit(rows_limit, :infinity), do: rows_limit
+
+  defp effective_rows_limit(rows_limit, max_rows)
+       when is_integer(max_rows) and max_rows > 0 do
+    # A `:rows_limit` of 0 means "no limit" in the ReadRows proto.
+    if rows_limit > 0, do: min(rows_limit, max_rows + 1), else: max_rows + 1
+  end
+
+  defp enforce_max_rows(rows, :infinity), do: {:ok, rows}
+
+  defp enforce_max_rows(rows, max_rows) do
+    if length(rows) > max_rows, do: {:error, :result_too_large}, else: {:ok, rows}
   end
 
   @doc """
@@ -143,8 +216,9 @@ defmodule MegasPinakas do
   @doc """
   Samples row keys from a BigTable table.
 
-  Returns a stream of sample row keys that can be used to split the table
-  into segments for parallel processing.
+  Returns a list of sample row keys that can be used to split the table into
+  segments for parallel processing. Each sample carries a `row_key` and the
+  approximate `offset_bytes` of data preceding it.
 
   ## Options
 
@@ -152,10 +226,19 @@ defmodule MegasPinakas do
 
   ## Examples
 
-      {:ok, stream} = MegasPinakas.sample_row_keys("project", "instance", "table")
+      {:ok, samples} = MegasPinakas.sample_row_keys("project", "instance", "table")
+
+      # Split the table into ranges for parallel scans
+      boundaries = Enum.map(samples, & &1.row_key)
+
+  > #### Changed in 0.6.0 {: .warning}
+  >
+  > Previously returned an unconsumed gRPC stream. It now returns a list,
+  > materialized inside the request span so failures surface as `{:error, _}`
+  > rather than when the caller happens to enumerate.
   """
   @spec sample_row_keys(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, Enumerable.t()} | {:error, term()}
+          {:ok, [SampleRowKeysResponse.t()]} | {:error, term()}
   def sample_row_keys(project_id, instance_id, table_id, opts \\ []) do
     operation = fn channel ->
       request = %SampleRowKeysRequest{
@@ -164,7 +247,11 @@ defmodule MegasPinakas do
       }
 
       auth_opts = Auth.request_opts()
-      Stub.sample_row_keys(channel, request, auth_opts)
+
+      case Stub.sample_row_keys(channel, request, auth_opts) do
+        {:ok, stream} -> collect_response_stream(stream)
+        other -> other
+      end
     end
 
     Client.execute(operation)
@@ -211,7 +298,21 @@ defmodule MegasPinakas do
   @doc """
   Mutates multiple rows in a BigTable table.
 
-  Returns a stream of responses indicating the status of each row mutation.
+  Returns one result per entry, ordered by `index`, which is the position of the
+  entry in the list you passed in.
+
+  ## Per-entry failures are not request failures
+
+  `MutateRows` is partial-success: the RPC can succeed while individual rows
+  fail. `{:ok, results}` therefore does **not** mean every mutation applied —
+  you must inspect each status:
+
+      {:ok, results} = MegasPinakas.mutate_rows(project, instance, table, entries)
+
+      case Enum.reject(results, &(&1.status.code == 0)) do
+        [] -> :all_applied
+        failed -> {:error, Enum.map(failed, &{&1.index, &1.status.message})}
+      end
 
   ## Options
 
@@ -223,10 +324,17 @@ defmodule MegasPinakas do
         %{row_key: "row1", mutations: [MegasPinakas.set_cell("cf", "col", "val1")]},
         %{row_key: "row2", mutations: [MegasPinakas.set_cell("cf", "col", "val2")]}
       ]
-      {:ok, stream} = MegasPinakas.mutate_rows("project", "instance", "table", entries)
+      {:ok, results} = MegasPinakas.mutate_rows("project", "instance", "table", entries)
+
+  > #### Breaking change in 0.6.0 {: .warning}
+  >
+  > Previously returned an unconsumed gRPC stream despite documenting "a list of
+  > results, one for each row". A caller who never enumerated that stream
+  > silently discarded every per-entry failure. It now returns the list it always
+  > claimed to.
   """
   @spec mutate_rows(String.t(), String.t(), String.t(), [map()], keyword()) ::
-          {:ok, Enumerable.t()} | {:error, term()}
+          {:ok, [MutateRowsResponse.Entry.t()]} | {:error, term()}
   def mutate_rows(project_id, instance_id, table_id, entries, opts \\ []) do
     operation = fn channel ->
       request_entries =
@@ -244,7 +352,11 @@ defmodule MegasPinakas do
       }
 
       auth_opts = Auth.request_opts()
-      Stub.mutate_rows(channel, request, auth_opts)
+
+      case Stub.mutate_rows(channel, request, auth_opts) do
+        {:ok, stream} -> collect_mutate_rows_stream(stream)
+        other -> other
+      end
     end
 
     Client.execute(operation)
@@ -745,6 +857,45 @@ defmodule MegasPinakas do
   # Private Helpers
   # ============================================================================
 
+  # Materializes a server-streaming response inside the request span.
+  #
+  # Returning the raw stream let the RPC fail *after* Client.execute/2 had already
+  # reported success, and a caller who never enumerated it never learned anything
+  # went wrong.
+  defp collect_response_stream(stream) do
+    Enum.reduce_while(stream, {:ok, []}, fn
+      {:ok, response}, {:ok, acc} ->
+        {:cont, {:ok, [response | acc]}}
+
+      {:trailers, _trailers}, acc ->
+        {:cont, acc}
+
+      {:error, reason}, _acc ->
+        Logger.warning("BigTable response stream error: #{inspect(reason)}")
+        {:halt, {:error, {:incomplete_read, reason}}}
+
+      unexpected, _acc ->
+        Logger.warning("BigTable unexpected stream element: #{inspect(unexpected)}")
+        {:halt, {:error, {:unexpected_stream_element, unexpected}}}
+    end)
+    |> case do
+      {:ok, responses} -> {:ok, Enum.reverse(responses)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # MutateRows splits its per-entry results across an arbitrary number of
+  # responses, so flatten them and restore the caller's entry order.
+  defp collect_mutate_rows_stream(stream) do
+    case collect_response_stream(stream) do
+      {:ok, responses} ->
+        {:ok, responses |> Enum.flat_map(& &1.entries) |> Enum.sort_by(& &1.index)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # Calculates the exclusive end key for a prefix scan.
   # Returns <<>> (empty binary) when all bytes are 0xFF, meaning "no upper bound"
   # — the scan should read to the end of the table.
@@ -754,107 +905,13 @@ defmodule MegasPinakas do
 
   defp calculate_prefix_end(prefix) do
     prefix_size = byte_size(prefix) - 1
-    <<head::binary-size(prefix_size), last_byte>> = prefix
+    <<head::binary-size(^prefix_size), last_byte>> = prefix
 
     if last_byte == 255 do
       calculate_prefix_end(head)
     else
       <<head::binary, last_byte + 1>>
     end
-  end
-
-  defp collect_read_rows_stream(stream) do
-    stream
-    |> Enum.reduce({[], nil, []}, &process_read_rows_chunk/2)
-    |> finalize_rows()
-  end
-
-  defp process_read_rows_chunk({:ok, %ReadRowsResponse{chunks: chunks}}, acc) do
-    Enum.reduce(chunks, acc, &process_chunk/2)
-  end
-
-  defp process_read_rows_chunk({:error, reason}, acc) do
-    Logger.warning("BigTable read_rows stream error: #{inspect(reason)}")
-    acc
-  end
-
-  defp process_read_rows_chunk(unexpected, acc) do
-    Logger.warning("BigTable read_rows unexpected chunk: #{inspect(unexpected)}")
-    acc
-  end
-
-  defp process_chunk(chunk, {rows, current_row, current_cells}) do
-    new_cells = accumulate_cells(chunk, current_cells)
-    apply_row_status(chunk.row_status, chunk, rows, current_row, new_cells)
-  end
-
-  defp accumulate_cells(%{value: nil}, current_cells), do: current_cells
-
-  defp accumulate_cells(%{value: _} = chunk, current_cells) do
-    [
-      %{
-        family: chunk.family_name && chunk.family_name.value,
-        qualifier: chunk.qualifier && chunk.qualifier.value,
-        timestamp: chunk.timestamp_micros,
-        value: chunk.value,
-        labels: chunk.labels
-      }
-      | current_cells
-    ]
-  end
-
-  defp apply_row_status({:commit_row, true}, chunk, rows, current_row, new_cells) do
-    row_key = resolve_row_key(chunk, current_row)
-    row = build_row(row_key, new_cells)
-    {[row | rows], nil, []}
-  end
-
-  defp apply_row_status({:reset_row, true}, _chunk, rows, _current_row, _new_cells) do
-    {rows, nil, []}
-  end
-
-  defp apply_row_status(_status, chunk, rows, current_row, new_cells) do
-    new_row = %{key: resolve_row_key(chunk, current_row)}
-    {rows, new_row, new_cells}
-  end
-
-  defp resolve_row_key(chunk, current_row) do
-    chunk.row_key || (current_row && current_row.key)
-  end
-
-  defp build_row(key, cells) do
-    # Single-pass: group cells by {family, qualifier} while reversing
-    grouped =
-      Enum.reduce(cells, %{}, fn cell, acc ->
-        group_key = {cell.family, cell.qualifier}
-
-        bigtable_cell = %Google.Bigtable.V2.Cell{
-          timestamp_micros: cell.timestamp,
-          value: cell.value,
-          labels: cell.labels || []
-        }
-
-        Map.update(acc, group_key, [bigtable_cell], &[bigtable_cell | &1])
-      end)
-
-    # Build family/column hierarchy
-    families =
-      grouped
-      |> Enum.group_by(fn {{family, _qual}, _cells} -> family end)
-      |> Enum.map(fn {family, entries} ->
-        columns =
-          Enum.map(entries, fn {{_fam, qualifier}, col_cells} ->
-            %Google.Bigtable.V2.Column{qualifier: qualifier, cells: col_cells}
-          end)
-
-        %Google.Bigtable.V2.Family{name: family, columns: columns}
-      end)
-
-    %Row{key: key, families: families}
-  end
-
-  defp finalize_rows({rows, _current_row, _current_cells}) do
-    Enum.reverse(rows)
   end
 
   # ===========================================================================
