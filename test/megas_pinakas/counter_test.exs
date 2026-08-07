@@ -1,9 +1,11 @@
 defmodule MegasPinakas.CounterTest do
   use ExUnit.Case, async: true
 
-  alias Google.Bigtable.V2.ReadModifyWriteRule
+  alias Google.Bigtable.V2.{Cell, Column, Family, ReadModifyWriteRowResponse, ReadModifyWriteRule}
+  alias Google.Bigtable.V2.Row, as: BigtableRow
   alias MegasPinakas.Counter
   alias MegasPinakas.Row
+  alias MegasPinakas.Types
 
   describe "increment_rule/3" do
     test "creates an increment rule" do
@@ -119,5 +121,60 @@ defmodule MegasPinakas.CounterTest do
       functions = Counter.__info__(:functions)
       assert {:increment_rule, 3} in functions
     end
+  end
+
+  # Shared by Counter and CounterTTL, which both decode a counter out of a
+  # read-modify-write response. Previously duplicated verbatim in both modules.
+  describe "extract_counter_value/3" do
+    test "returns nil when the response carries no row" do
+      response = %ReadModifyWriteRowResponse{row: nil}
+
+      assert Counter.extract_counter_value(response, "cf", "views") == {:ok, nil}
+    end
+
+    test "returns nil when the row lacks the requested column" do
+      response = counter_response("cf", "clicks", Types.encode(:integer, 7))
+
+      assert Counter.extract_counter_value(response, "cf", "views") == {:ok, nil}
+    end
+
+    test "returns nil when the row lacks the requested family" do
+      response = counter_response("other", "views", Types.encode(:integer, 7))
+
+      assert Counter.extract_counter_value(response, "cf", "views") == {:ok, nil}
+    end
+
+    test "decodes the counter value" do
+      response = counter_response("cf", "views", Types.encode(:integer, 42))
+
+      assert Counter.extract_counter_value(response, "cf", "views") == {:ok, 42}
+    end
+
+    test "decodes a negative counter value" do
+      response = counter_response("cf", "views", Types.encode(:integer, -5))
+
+      assert Counter.extract_counter_value(response, "cf", "views") == {:ok, -5}
+    end
+
+    test "surfaces a decode error for a malformed value" do
+      response = counter_response("cf", "views", "not-eight-bytes")
+
+      assert Counter.extract_counter_value(response, "cf", "views") ==
+               {:error, :invalid_integer_format}
+    end
+  end
+
+  defp counter_response(family, qualifier, value) do
+    %ReadModifyWriteRowResponse{
+      row: %BigtableRow{
+        key: "counter#1",
+        families: [
+          %Family{
+            name: family,
+            columns: [%Column{qualifier: qualifier, cells: [%Cell{value: value}]}]
+          }
+        ]
+      }
+    }
   end
 end

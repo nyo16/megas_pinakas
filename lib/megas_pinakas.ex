@@ -56,7 +56,7 @@ defmodule MegasPinakas do
   they are bounded by the keys or window you pass in, so keep those bounded.
   """
 
-  alias MegasPinakas.{Auth, Client, Config, RowAssembler}
+  alias MegasPinakas.{Auth, Client, Config, Filter, RowAssembler}
 
   # Aliases for protobuf modules
   alias Google.Bigtable.V2.{
@@ -752,6 +752,11 @@ defmodule MegasPinakas do
   # Filter Builders
   # ============================================================================
 
+  # These are convenience re-exports of the most common builders in
+  # `MegasPinakas.Filter`. They delegate rather than re-implement: when they were
+  # separate copies, `column_filter/2` drifted and started emitting an unescaped,
+  # unanchored qualifier regex, which silently over-matched columns.
+
   @doc """
   Creates a filter that matches a specific column.
 
@@ -759,19 +764,8 @@ defmodule MegasPinakas do
 
       MegasPinakas.column_filter("cf", "col")
   """
-  @spec column_filter(String.t(), binary()) :: RowFilter.t()
-  def column_filter(family_name, column_qualifier) do
-    %RowFilter{
-      filter:
-        {:chain,
-         %RowFilter.Chain{
-           filters: [
-             %RowFilter{filter: {:family_name_regex_filter, "^#{Regex.escape(family_name)}$"}},
-             %RowFilter{filter: {:column_qualifier_regex_filter, column_qualifier}}
-           ]
-         }}
-    }
-  end
+  @spec column_filter(String.t(), String.t()) :: RowFilter.t()
+  defdelegate column_filter(family_name, column_qualifier), to: Filter
 
   @doc """
   Creates a filter that matches a column family.
@@ -781,9 +775,7 @@ defmodule MegasPinakas do
       MegasPinakas.family_filter("cf")
   """
   @spec family_filter(String.t()) :: RowFilter.t()
-  def family_filter(family_name) do
-    %RowFilter{filter: {:family_name_regex_filter, "^#{Regex.escape(family_name)}$"}}
-  end
+  defdelegate family_filter(family_name), to: Filter
 
   @doc """
   Creates a filter that limits cells per column.
@@ -792,10 +784,8 @@ defmodule MegasPinakas do
 
       MegasPinakas.cells_per_column_limit_filter(1)
   """
-  @spec cells_per_column_limit_filter(integer()) :: RowFilter.t()
-  def cells_per_column_limit_filter(limit) do
-    %RowFilter{filter: {:cells_per_column_limit_filter, limit}}
-  end
+  @spec cells_per_column_limit_filter(pos_integer()) :: RowFilter.t()
+  defdelegate cells_per_column_limit_filter(limit), to: Filter
 
   @doc """
   Creates a filter that passes all cells.
@@ -805,9 +795,7 @@ defmodule MegasPinakas do
       MegasPinakas.pass_all_filter()
   """
   @spec pass_all_filter() :: RowFilter.t()
-  def pass_all_filter do
-    %RowFilter{filter: {:pass_all_filter, true}}
-  end
+  defdelegate pass_all_filter(), to: Filter
 
   @doc """
   Creates a filter that blocks all cells.
@@ -817,9 +805,7 @@ defmodule MegasPinakas do
       MegasPinakas.block_all_filter()
   """
   @spec block_all_filter() :: RowFilter.t()
-  def block_all_filter do
-    %RowFilter{filter: {:block_all_filter, true}}
-  end
+  defdelegate block_all_filter(), to: Filter
 
   @doc """
   Chains multiple filters together (AND logic).
@@ -833,9 +819,7 @@ defmodule MegasPinakas do
       MegasPinakas.chain_filters(filters)
   """
   @spec chain_filters([RowFilter.t()]) :: RowFilter.t()
-  def chain_filters(filters) do
-    %RowFilter{filter: {:chain, %RowFilter.Chain{filters: filters}}}
-  end
+  defdelegate chain_filters(filters), to: Filter
 
   @doc """
   Interleaves multiple filters (OR logic).
@@ -849,9 +833,7 @@ defmodule MegasPinakas do
       MegasPinakas.interleave_filters(filters)
   """
   @spec interleave_filters([RowFilter.t()]) :: RowFilter.t()
-  def interleave_filters(filters) do
-    %RowFilter{filter: {:interleave, %RowFilter.Interleave{filters: filters}}}
-  end
+  defdelegate interleave_filters(filters), to: Filter
 
   # ============================================================================
   # Private Helpers

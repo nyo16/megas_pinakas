@@ -182,6 +182,18 @@ defmodule MegasPinakasTest do
       assert length(chain.filters) == 2
     end
 
+    test "column_filter/2 anchors the qualifier so it cannot substring-match" do
+      filter = MegasPinakas.column_filter("cf", "name")
+
+      assert qualifier_regex(filter) == "^name$"
+    end
+
+    test "column_filter/2 escapes regex metacharacters in the qualifier" do
+      filter = MegasPinakas.column_filter("cf", "user.name")
+
+      assert qualifier_regex(filter) == "^user\\.name$"
+    end
+
     test "family_filter/1 creates a filter for column family" do
       filter = MegasPinakas.family_filter("cf")
 
@@ -235,7 +247,57 @@ defmodule MegasPinakasTest do
     end
   end
 
+  # MegasPinakas re-exports these builders from MegasPinakas.Filter. They used to
+  # be re-implemented rather than delegated, and column_filter/2 silently drifted:
+  # the root copy left the qualifier unescaped and unanchored, so it over-matched
+  # columns against RE2's unanchored default. These assert the two stay identical.
+  describe "filter builders delegate to MegasPinakas.Filter" do
+    test "column_filter/2 matches Filter.column_filter/2" do
+      assert MegasPinakas.column_filter("cf", "user.name") ==
+               MegasPinakas.Filter.column_filter("cf", "user.name")
+    end
+
+    test "family_filter/1 matches Filter.family_filter/1" do
+      assert MegasPinakas.family_filter("cf.test") ==
+               MegasPinakas.Filter.family_filter("cf.test")
+    end
+
+    test "cells_per_column_limit_filter/1 matches Filter.cells_per_column_limit_filter/1" do
+      assert MegasPinakas.cells_per_column_limit_filter(3) ==
+               MegasPinakas.Filter.cells_per_column_limit_filter(3)
+    end
+
+    test "pass_all_filter/0 matches Filter.pass_all_filter/0" do
+      assert MegasPinakas.pass_all_filter() == MegasPinakas.Filter.pass_all_filter()
+    end
+
+    test "block_all_filter/0 matches Filter.block_all_filter/0" do
+      assert MegasPinakas.block_all_filter() == MegasPinakas.Filter.block_all_filter()
+    end
+
+    test "chain_filters/1 matches Filter.chain_filters/1" do
+      filters = [MegasPinakas.family_filter("cf")]
+
+      assert MegasPinakas.chain_filters(filters) == MegasPinakas.Filter.chain_filters(filters)
+    end
+
+    test "interleave_filters/1 matches Filter.interleave_filters/1" do
+      filters = [MegasPinakas.family_filter("cf1"), MegasPinakas.family_filter("cf2")]
+
+      assert MegasPinakas.interleave_filters(filters) ==
+               MegasPinakas.Filter.interleave_filters(filters)
+    end
+  end
+
   # Helper to build test rows
+  # Digs the qualifier regex out of the chain that column_filter/2 builds.
+  defp qualifier_regex(%RowFilter{filter: {:chain, %RowFilter.Chain{filters: filters}}}) do
+    Enum.find_value(filters, fn
+      %RowFilter{filter: {:column_qualifier_regex_filter, regex}} -> regex
+      _ -> nil
+    end)
+  end
+
   defp build_test_row(key, families_data) do
     families = Enum.map(families_data, &build_test_family/1)
     %Row{key: key, families: families}

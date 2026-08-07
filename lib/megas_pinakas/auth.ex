@@ -211,5 +211,5 @@ defmodule MegasPinakas.Auth do
       {:error, {:auth_error, Exception.message(e)}}
   end
 
-  defp now, do: System.os_time(:second)
+  defp now, do: Cache.now()
 end

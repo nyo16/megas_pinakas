@@ -172,5 +172,9 @@ defmodule MegasPinakas.Auth.Cache do
     end
   end
 
-  defp now, do: System.os_time(:second)
+  # The single clock behind token expiry. `MegasPinakas.Auth` stamps `expires_at`
+  # with this and the cache compares against it, so the two must not drift apart.
+  @doc false
+  @spec now() :: integer()
+  def now, do: System.os_time(:second)
 end

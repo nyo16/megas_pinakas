@@ -37,6 +37,8 @@ defmodule MegasPinakas.CounterTTL do
   """
 
   alias MegasPinakas
+  alias MegasPinakas.Counter
+  alias MegasPinakas.RowKey
   alias MegasPinakas.Types
 
   @default_family "counters"
@@ -81,7 +83,7 @@ defmodule MegasPinakas.CounterTTL do
 
     case MegasPinakas.read_modify_write_row(project, instance, table, row_key, rules, opts) do
       {:ok, response} ->
-        extract_counter_value(response, family, qualifier)
+        Counter.extract_counter_value(response, family, qualifier)
 
       {:error, reason} ->
         {:error, reason}
@@ -316,17 +318,11 @@ defmodule MegasPinakas.CounterTTL do
   """
   @spec parse_row_key(String.t()) :: {:ok, map()} | {:error, :invalid_format}
   def parse_row_key(row_key) do
-    case String.split(row_key, "#") |> Enum.reverse() do
-      [timestamp_str | rest] ->
-        key = rest |> Enum.reverse() |> Enum.join("#")
+    {key, timestamp_str} = RowKey.split_suffix(row_key)
 
-        case Integer.parse(timestamp_str) do
-          {timestamp, ""} ->
-            {:ok, %{key: key, bucket_timestamp: timestamp}}
-
-          _ ->
-            {:error, :invalid_format}
-        end
+    case Integer.parse(timestamp_str) do
+      {timestamp, ""} ->
+        {:ok, %{key: key, bucket_timestamp: timestamp}}
 
       _ ->
         {:error, :invalid_format}
@@ -346,22 +342,6 @@ defmodule MegasPinakas.CounterTTL do
   # ============================================================================
   # Private Helpers
   # ============================================================================
-
-  defp extract_counter_value(response, family, qualifier) do
-    case response.row do
-      nil ->
-        {:ok, nil}
-
-      row ->
-        value = MegasPinakas.get_cell(row, family, qualifier)
-
-        if value do
-          Types.decode(:integer, value)
-        else
-          {:ok, nil}
-        end
-    end
-  end
 
   defp sum_counter_from_row(row, family, qualifier) do
     case MegasPinakas.get_cell(row, family, qualifier) do

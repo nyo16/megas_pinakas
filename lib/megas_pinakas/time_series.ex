@@ -31,6 +31,7 @@ defmodule MegasPinakas.TimeSeries do
 
   alias MegasPinakas
   alias MegasPinakas.Row
+  alias MegasPinakas.RowKey
   alias MegasPinakas.Types
 
   # Max timestamp for reverse ordering (year 2286 in microseconds)
@@ -305,20 +306,14 @@ defmodule MegasPinakas.TimeSeries do
   """
   @spec parse_row_key(String.t()) :: {:ok, map()} | {:error, term()}
   def parse_row_key(row_key) do
-    case String.split(row_key, "#") |> Enum.reverse() do
-      [reverse_ts | rest] ->
-        metric_id = rest |> Enum.reverse() |> Enum.join("#")
+    {metric_id, reverse_ts} = RowKey.split_suffix(row_key)
 
-        case from_reverse_timestamp(reverse_ts) do
-          {:ok, timestamp} ->
-            {:ok, %{metric_id: metric_id, timestamp: timestamp}}
+    case from_reverse_timestamp(reverse_ts) do
+      {:ok, timestamp} ->
+        {:ok, %{metric_id: metric_id, timestamp: timestamp}}
 
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      _ ->
-        {:error, :invalid_format}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

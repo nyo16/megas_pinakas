@@ -240,4 +240,18 @@ defmodule MegasPinakas.Auth.CacheTest do
       end
     end
   end
+
+  # The single clock behind token expiry. Auth stamps `expires_at` with it and
+  # Cache compares against it, so the two must not drift apart.
+  describe "now/0" do
+    test "returns the current unix time in seconds" do
+      before = System.os_time(:second)
+      now = Cache.now()
+      later = System.os_time(:second)
+
+      assert is_integer(now)
+      assert now >= before
+      assert now <= later
+    end
+  end
 end
