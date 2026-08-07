@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-07
+
+### Fixed
+- `MegasPinakas.column_filter/2` no longer emits an unescaped, unanchored column
+  qualifier regex. It was a copy of `MegasPinakas.Filter.column_filter/2` that had
+  drifted: the qualifier was interpolated raw, so `column_filter("cf", "user.name")`
+  produced `{:column_qualifier_regex_filter, "user.name"}`. Qualifier regexes are
+  RE2 and unanchored by default, so that matched `userXname` and substring-matched
+  `prefix_user_name_suffix` — reading cells the caller never asked for. It now
+  produces `"^user\\.name$"`, identical to `MegasPinakas.Filter.column_filter/2`.
+
+  **This changes which cells a read returns.** Callers who deliberately passed a
+  regex through `MegasPinakas.column_filter/2` should use
+  `MegasPinakas.Filter.column_qualifier_regex_filter/1` instead.
+
+### Changed
+- The filter builders re-exported from `MegasPinakas` (`column_filter/2`,
+  `family_filter/1`, `cells_per_column_limit_filter/1`, `pass_all_filter/0`,
+  `block_all_filter/0`, `chain_filters/1`, `interleave_filters/1`) now delegate to
+  `MegasPinakas.Filter` instead of re-implementing it, so the two cannot drift
+  apart again. They therefore pick up `MegasPinakas.Filter`'s argument guards:
+  `cells_per_column_limit_filter/1` now requires a positive integer, and the others
+  require binaries or lists. Previously these accepted any term.
+
+### Internal
+- `extract_counter_value/3` is shared by `Counter` and `CounterTTL` rather than
+  duplicated verbatim in both.
+- Row-key splitting shared by `CounterTTL` and `TimeSeries` moved into
+  `MegasPinakas.RowKey`.
+- The token-expiry clock has a single implementation in `MegasPinakas.Auth.Cache`.
+
+### Dependencies
+- `grpc_connection_pool` `~> 0.5` → `~> 0.5.2` (pulls in `gun ~> 2.4`)
+
 ## [0.6.0] - 2026-08-06
 
 ### Breaking Changes
@@ -206,5 +240,6 @@ Measured with Benchee on an Apple M4 Max against the BigTable emulator
 - Support for BigTable emulator and production (via Goth)
 - Configurable pool size and timeouts
 
+[0.6.1]: https://github.com/nyo16/megas_pinakas/releases/tag/v0.6.1
 [0.6.0]: https://github.com/nyo16/megas_pinakas/releases/tag/v0.6.0
 [0.5.0]: https://github.com/nyo16/megas_pinakas/releases/tag/v0.5.0

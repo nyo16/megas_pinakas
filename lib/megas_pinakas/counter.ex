@@ -320,11 +320,12 @@ defmodule MegasPinakas.Counter do
     MegasPinakas.increment_rule(family, qualifier, amount)
   end
 
-  # ============================================================================
-  # Private Helpers
-  # ============================================================================
-
-  defp extract_counter_value(response, family, qualifier) do
+  # Shared with `MegasPinakas.CounterTTL`, which decodes counters out of the same
+  # read-modify-write response shape. Public only so CounterTTL can reach it.
+  @doc false
+  @spec extract_counter_value(map(), String.t(), String.t()) ::
+          {:ok, integer() | nil} | {:error, term()}
+  def extract_counter_value(response, family, qualifier) do
     case response.row do
       nil ->
         {:ok, nil}
@@ -339,6 +340,10 @@ defmodule MegasPinakas.Counter do
         end
     end
   end
+
+  # ============================================================================
+  # Private Helpers
+  # ============================================================================
 
   defp extract_all_counter_values(response, counters) do
     case response.row do

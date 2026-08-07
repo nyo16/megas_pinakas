@@ -1,7 +1,7 @@
 defmodule MegasPinakas.MixProject do
   use Mix.Project
 
-  @version "0.6.0"
+  @version "0.6.1"
   @source_url "https://github.com/nyo16/megas_pinakas"
 
   def project do
@@ -90,7 +90,7 @@ defmodule MegasPinakas.MixProject do
 
   defp deps do
     [
-      {:grpc_connection_pool, "~> 0.5"},
+      {:grpc_connection_pool, "~> 0.5.2"},
       {:googleapis_proto_ex, "~> 0.4"},
       {:goth, "~> 1.4"},
       {:benchee, "~> 1.3", only: [:dev, :test], runtime: false},

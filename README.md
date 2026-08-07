@@ -9,7 +9,7 @@ Add `megas_pinakas` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:megas_pinakas, "~> 0.6.0"}
+    {:megas_pinakas, "~> 0.6.1"}
   ]
 end
 ```
@@ -60,7 +60,7 @@ For production, use [Goth](https://github.com/peburrows/goth) for Google Cloud a
 # Add to dependencies in mix.exs
 def deps do
   [
-    {:megas_pinakas, "~> 0.6.0"},
+    {:megas_pinakas, "~> 0.6.1"},
     {:goth, "~> 1.4"}
   ]
 end
