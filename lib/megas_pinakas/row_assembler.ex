@@ -71,7 +71,7 @@ defmodule MegasPinakas.RowAssembler do
   cannot distinguish from a complete one. A gRPC failure is normalized to
   `{status_atom, message}` via `MegasPinakas.Response.normalize_reason/1`.
   """
-  @spec reduce_all(Enumerable.t()) :: {:ok, [Row.t()]} | {:error, term()}
+  @spec reduce_all(Enumerable.t()) :: {:ok, [%Row{}]} | {:error, term()}
   def reduce_all(stream) do
     case Enum.reduce_while(stream, {:ok, {[], new()}}, &reduce_element/2) do
       {:ok, {rows, _state}} -> {:ok, Enum.reverse(rows)}
@@ -116,7 +116,7 @@ defmodule MegasPinakas.RowAssembler do
   Returns `{:row, row, next_state}` when the chunk commits a row, or
   `{:cont, next_state}` when the row is still being assembled.
   """
-  @spec apply_chunk(struct(), state()) :: {:row, Row.t(), state()} | {:cont, state()}
+  @spec apply_chunk(struct(), state()) :: {:row, %Row{}, state()} | {:cont, state()}
   def apply_chunk(chunk, state) do
     case chunk.row_status do
       # Discards the partially-assembled row; the server will resend it.

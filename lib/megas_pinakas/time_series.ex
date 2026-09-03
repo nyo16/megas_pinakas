@@ -121,7 +121,7 @@ defmodule MegasPinakas.TimeSeries do
   > discarded unless the caller enumerated it.
   """
   @spec write_points(String.t(), String.t(), String.t(), [map()], keyword()) ::
-          {:ok, [Google.Bigtable.V2.MutateRowsResponse.Entry.t()]} | {:error, term()}
+          {:ok, [%Google.Bigtable.V2.MutateRowsResponse.Entry{}]} | {:error, term()}
   def write_points(project, instance, table, points, opts \\ []) when is_list(points) do
     family = Keyword.get(opts, :family, @default_family)
 

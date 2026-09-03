@@ -66,7 +66,7 @@ defmodule MegasPinakas.Filter do
       # Match row keys containing "admin"
       MegasPinakas.Filter.row_key_regex_filter("\\C*admin\\C*")
   """
-  @spec row_key_regex_filter(String.t()) :: RowFilter.t()
+  @spec row_key_regex_filter(String.t()) :: %RowFilter{}
   def row_key_regex_filter(regex) when is_binary(regex) do
     %RowFilter{filter: {:row_key_regex_filter, regex}}
   end
@@ -86,7 +86,7 @@ defmodule MegasPinakas.Filter do
       # Sample approximately 50% of rows
       MegasPinakas.Filter.row_sample_filter(0.5)
   """
-  @spec row_sample_filter(number()) :: RowFilter.t()
+  @spec row_sample_filter(number()) :: %RowFilter{}
   def row_sample_filter(probability)
       when is_number(probability) and probability > 0 and probability < 1 do
     %RowFilter{filter: {:row_sample_filter, probability / 1}}
@@ -104,7 +104,7 @@ defmodule MegasPinakas.Filter do
       # Return at most 100 cells per row
       MegasPinakas.Filter.cells_per_row_limit_filter(100)
   """
-  @spec cells_per_row_limit_filter(pos_integer()) :: RowFilter.t()
+  @spec cells_per_row_limit_filter(pos_integer()) :: %RowFilter{}
   def cells_per_row_limit_filter(limit) when is_integer(limit) and limit > 0 do
     %RowFilter{filter: {:cells_per_row_limit_filter, limit}}
   end
@@ -117,7 +117,7 @@ defmodule MegasPinakas.Filter do
       # Skip the first 10 cells in each row
       MegasPinakas.Filter.cells_per_row_offset_filter(10)
   """
-  @spec cells_per_row_offset_filter(non_neg_integer()) :: RowFilter.t()
+  @spec cells_per_row_offset_filter(non_neg_integer()) :: %RowFilter{}
   def cells_per_row_offset_filter(offset) when is_integer(offset) and offset >= 0 do
     %RowFilter{filter: {:cells_per_row_offset_filter, offset}}
   end
@@ -133,7 +133,7 @@ defmodule MegasPinakas.Filter do
       # Return the 3 most recent versions
       MegasPinakas.Filter.cells_per_column_limit_filter(3)
   """
-  @spec cells_per_column_limit_filter(pos_integer()) :: RowFilter.t()
+  @spec cells_per_column_limit_filter(pos_integer()) :: %RowFilter{}
   def cells_per_column_limit_filter(limit) when is_integer(limit) and limit > 0 do
     %RowFilter{filter: {:cells_per_column_limit_filter, limit}}
   end
@@ -152,7 +152,7 @@ defmodule MegasPinakas.Filter do
       # Match columns ending with "_count"
       MegasPinakas.Filter.column_qualifier_regex_filter("\\C*_count")
   """
-  @spec column_qualifier_regex_filter(String.t()) :: RowFilter.t()
+  @spec column_qualifier_regex_filter(String.t()) :: %RowFilter{}
   def column_qualifier_regex_filter(regex) when is_binary(regex) do
     %RowFilter{filter: {:column_qualifier_regex_filter, regex}}
   end
@@ -187,7 +187,7 @@ defmodule MegasPinakas.Filter do
         start_qualifier_open: "z"
       )
   """
-  @spec column_range_filter(String.t(), keyword()) :: RowFilter.t()
+  @spec column_range_filter(String.t(), keyword()) :: %RowFilter{}
   def column_range_filter(family, opts \\ []) when is_binary(family) do
     range = %ColumnRange{
       family_name: family,
@@ -218,7 +218,7 @@ defmodule MegasPinakas.Filter do
       end_micros = DateTime.to_unix(~U[2024-02-01 00:00:00Z], :microsecond)
       MegasPinakas.Filter.timestamp_range_filter(start_micros, end_micros)
   """
-  @spec timestamp_range_filter(non_neg_integer(), non_neg_integer()) :: RowFilter.t()
+  @spec timestamp_range_filter(non_neg_integer(), non_neg_integer()) :: %RowFilter{}
   def timestamp_range_filter(start_timestamp_micros, end_timestamp_micros)
       when is_integer(start_timestamp_micros) and start_timestamp_micros >= 0 and
              is_integer(end_timestamp_micros) and end_timestamp_micros >= 0 do
@@ -257,7 +257,7 @@ defmodule MegasPinakas.Filter do
         end_value_open: <<0, 0, 0, 0, 0, 0, 0, 200>>
       )
   """
-  @spec value_range_filter(keyword()) :: RowFilter.t()
+  @spec value_range_filter(keyword()) :: %RowFilter{}
   def value_range_filter(opts \\ []) do
     range = %ValueRange{
       start_value: range_bound(opts, :start_value_closed, :start_value_open),
@@ -300,7 +300,7 @@ defmodule MegasPinakas.Filter do
       # Match values that are valid UUIDs
       MegasPinakas.Filter.value_regex_filter("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")
   """
-  @spec value_regex_filter(String.t()) :: RowFilter.t()
+  @spec value_regex_filter(String.t()) :: %RowFilter{}
   def value_regex_filter(regex) when is_binary(regex) do
     %RowFilter{filter: {:value_regex_filter, regex}}
   end
@@ -319,7 +319,7 @@ defmodule MegasPinakas.Filter do
       MegasPinakas.Filter.family_filter("cf")
       MegasPinakas.Filter.family_filter("user_data")
   """
-  @spec family_filter(String.t()) :: RowFilter.t()
+  @spec family_filter(String.t()) :: %RowFilter{}
   def family_filter(family_name) when is_binary(family_name) do
     %RowFilter{filter: {:family_name_regex_filter, "^#{Regex.escape(family_name)}$"}}
   end
@@ -335,7 +335,7 @@ defmodule MegasPinakas.Filter do
       # Match families starting with "cf_"
       MegasPinakas.Filter.family_regex_filter("cf_\\C*")
   """
-  @spec family_regex_filter(String.t()) :: RowFilter.t()
+  @spec family_regex_filter(String.t()) :: %RowFilter{}
   def family_regex_filter(regex) when is_binary(regex) do
     %RowFilter{filter: {:family_name_regex_filter, regex}}
   end
@@ -347,7 +347,7 @@ defmodule MegasPinakas.Filter do
 
       MegasPinakas.Filter.column_filter("cf", "name")
   """
-  @spec column_filter(String.t(), String.t()) :: RowFilter.t()
+  @spec column_filter(String.t(), String.t()) :: %RowFilter{}
   def column_filter(family_name, column_qualifier)
       when is_binary(family_name) and is_binary(column_qualifier) do
     chain_filters([
@@ -370,7 +370,7 @@ defmodule MegasPinakas.Filter do
       # Get all columns but strip their values
       MegasPinakas.Filter.strip_value_filter()
   """
-  @spec strip_value_filter() :: RowFilter.t()
+  @spec strip_value_filter() :: %RowFilter{}
   def strip_value_filter do
     %RowFilter{filter: {:strip_value_transformer, true}}
   end
@@ -385,7 +385,7 @@ defmodule MegasPinakas.Filter do
 
       MegasPinakas.Filter.apply_label_filter("important")
   """
-  @spec apply_label_filter(String.t()) :: RowFilter.t()
+  @spec apply_label_filter(String.t()) :: %RowFilter{}
   def apply_label_filter(label) when is_binary(label) do
     %RowFilter{filter: {:apply_label_transformer, label}}
   end
@@ -403,7 +403,7 @@ defmodule MegasPinakas.Filter do
 
       MegasPinakas.Filter.pass_all_filter()
   """
-  @spec pass_all_filter() :: RowFilter.t()
+  @spec pass_all_filter() :: %RowFilter{}
   def pass_all_filter do
     %RowFilter{filter: {:pass_all_filter, true}}
   end
@@ -417,7 +417,7 @@ defmodule MegasPinakas.Filter do
 
       MegasPinakas.Filter.block_all_filter()
   """
-  @spec block_all_filter() :: RowFilter.t()
+  @spec block_all_filter() :: %RowFilter{}
   def block_all_filter do
     %RowFilter{filter: {:block_all_filter, true}}
   end
@@ -440,7 +440,7 @@ defmodule MegasPinakas.Filter do
         MegasPinakas.Filter.cells_per_column_limit_filter(1)
       ])
   """
-  @spec chain_filters([RowFilter.t()]) :: RowFilter.t()
+  @spec chain_filters([%RowFilter{}]) :: %RowFilter{}
   def chain_filters(filters) when is_list(filters) do
     %RowFilter{filter: {:chain, %RowFilter.Chain{filters: filters}}}
   end
@@ -459,7 +459,7 @@ defmodule MegasPinakas.Filter do
         MegasPinakas.Filter.column_filter("cf", "email")
       ])
   """
-  @spec interleave_filters([RowFilter.t()]) :: RowFilter.t()
+  @spec interleave_filters([%RowFilter{}]) :: %RowFilter{}
   def interleave_filters(filters) when is_list(filters) do
     %RowFilter{filter: {:interleave, %RowFilter.Interleave{filters: filters}}}
   end
@@ -488,7 +488,7 @@ defmodule MegasPinakas.Filter do
         MegasPinakas.Filter.pass_all_filter()
       )
   """
-  @spec condition_filter(RowFilter.t(), RowFilter.t() | nil, RowFilter.t() | nil) :: RowFilter.t()
+  @spec condition_filter(%RowFilter{}, %RowFilter{} | nil, %RowFilter{} | nil) :: %RowFilter{}
   def condition_filter(predicate_filter, true_filter, false_filter \\ nil) do
     condition = %RowFilter.Condition{
       predicate_filter: predicate_filter,
@@ -509,7 +509,7 @@ defmodule MegasPinakas.Filter do
 
       MegasPinakas.Filter.sink_filter()
   """
-  @spec sink_filter() :: RowFilter.t()
+  @spec sink_filter() :: %RowFilter{}
   def sink_filter do
     %RowFilter{filter: {:sink, true}}
   end
@@ -527,7 +527,7 @@ defmodule MegasPinakas.Filter do
 
       MegasPinakas.Filter.latest_only_filter()
   """
-  @spec latest_only_filter() :: RowFilter.t()
+  @spec latest_only_filter() :: %RowFilter{}
   def latest_only_filter do
     cells_per_column_limit_filter(1)
   end
@@ -539,7 +539,7 @@ defmodule MegasPinakas.Filter do
 
       MegasPinakas.Filter.column_latest_filter("cf", "name")
   """
-  @spec column_latest_filter(String.t(), String.t()) :: RowFilter.t()
+  @spec column_latest_filter(String.t(), String.t()) :: %RowFilter{}
   def column_latest_filter(family, qualifier) do
     chain_filters([
       column_filter(family, qualifier),
@@ -561,7 +561,7 @@ defmodule MegasPinakas.Filter do
       # Cells from the last 30 minutes
       MegasPinakas.Filter.time_window_filter(:minute, 30)
   """
-  @spec time_window_filter(atom(), pos_integer()) :: RowFilter.t()
+  @spec time_window_filter(atom(), pos_integer()) :: %RowFilter{}
   def time_window_filter(unit, count \\ 1) do
     now = System.system_time(:microsecond)
 
@@ -591,7 +591,7 @@ defmodule MegasPinakas.Filter do
       MegasPinakas.Filter.row_key_prefix_filter("user#")
       # => matches "user#", "user#1", "user#2", not "admin#1"
   """
-  @spec row_key_prefix_filter(String.t()) :: RowFilter.t()
+  @spec row_key_prefix_filter(String.t()) :: %RowFilter{}
   def row_key_prefix_filter(prefix) when is_binary(prefix) do
     row_key_regex_filter(Regex.escape(prefix) <> "\\C*")
   end

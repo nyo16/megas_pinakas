@@ -244,7 +244,7 @@ defmodule MegasPinakas.Cache do
   > discarded unless the caller enumerated it.
   """
   @spec delete_many(String.t(), String.t(), String.t(), [String.t()], keyword()) ::
-          {:ok, [Google.Bigtable.V2.MutateRowsResponse.Entry.t()]} | {:error, term()}
+          {:ok, [%Google.Bigtable.V2.MutateRowsResponse.Entry{}]} | {:error, term()}
   def delete_many(project, instance, table, keys, opts \\ []) when is_list(keys) do
     {family, qualifier} = column(opts)
 

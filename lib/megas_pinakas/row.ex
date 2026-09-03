@@ -39,7 +39,7 @@ defmodule MegasPinakas.Row do
 
   @type t :: %__MODULE__{
           row_key: binary(),
-          mutations: [Google.Bigtable.V2.Mutation.t()]
+          mutations: [%Google.Bigtable.V2.Mutation{}]
         }
 
   # ============================================================================
@@ -269,7 +269,7 @@ defmodule MegasPinakas.Row do
 
   Useful for manual mutation handling or debugging.
   """
-  @spec to_mutations(t()) :: [Google.Bigtable.V2.Mutation.t()]
+  @spec to_mutations(t()) :: [%Google.Bigtable.V2.Mutation{}]
   def to_mutations(%__MODULE__{mutations: mutations}) do
     Enum.reverse(mutations)
   end
@@ -287,7 +287,7 @@ defmodule MegasPinakas.Row do
 
       # => %{row_key: "user#123", mutations: [...]}
   """
-  @spec to_entry(t()) :: %{row_key: binary(), mutations: [Google.Bigtable.V2.Mutation.t()]}
+  @spec to_entry(t()) :: %{row_key: binary(), mutations: [%Google.Bigtable.V2.Mutation{}]}
   def to_entry(%__MODULE__{row_key: row_key, mutations: mutations}) do
     %{row_key: row_key, mutations: Enum.reverse(mutations)}
   end

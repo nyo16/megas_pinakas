@@ -45,7 +45,7 @@ defmodule MegasPinakas.Batch do
 
   defstruct entries: []
 
-  @type entry :: %{row_key: binary(), mutations: [Google.Bigtable.V2.Mutation.t()]}
+  @type entry :: %{row_key: binary(), mutations: [%Google.Bigtable.V2.Mutation{}]}
   @type t :: %__MODULE__{entries: [entry()]}
 
   # ============================================================================
@@ -96,7 +96,7 @@ defmodule MegasPinakas.Batch do
            MegasPinakas.set_cell("cf", "age", "30")
          ])
   """
-  @spec add(t(), binary(), [Google.Bigtable.V2.Mutation.t()]) :: t()
+  @spec add(t(), binary(), [%Google.Bigtable.V2.Mutation{}]) :: t()
   def add(%__MODULE__{entries: entries} = batch, row_key, mutations)
       when is_binary(row_key) and is_list(mutations) do
     entry = %{row_key: row_key, mutations: mutations}
@@ -159,7 +159,7 @@ defmodule MegasPinakas.Batch do
   > so per-row failures were silently discarded unless the caller enumerated it.
   """
   @spec write(t(), String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, [Google.Bigtable.V2.MutateRowsResponse.Entry.t()]} | {:error, term()}
+          {:ok, [%Google.Bigtable.V2.MutateRowsResponse.Entry{}]} | {:error, term()}
   def write(%__MODULE__{} = batch, project, instance, table, opts \\ []) do
     batch
     |> to_entries()

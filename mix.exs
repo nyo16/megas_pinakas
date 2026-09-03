@@ -65,6 +65,9 @@ defmodule MegasPinakas.MixProject do
       extras: ["README.md", "CHANGELOG.md"],
       source_ref: "v#{@version}",
       source_url: @source_url,
+      # googleapis_proto_ex generates its modules with @moduledoc false, so
+      # ex_doc can never link to them; do not try (and do not warn).
+      skip_code_autolink_to: &String.starts_with?(&1, "Google."),
       groups_for_modules: [
         Core: [
           MegasPinakas,

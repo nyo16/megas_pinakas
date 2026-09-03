@@ -121,7 +121,7 @@ defmodule MegasPinakas.InstanceAdmin do
 
       {:ok, instance} = MegasPinakas.InstanceAdmin.get_instance("project", "my-instance")
   """
-  @spec get_instance(String.t(), String.t()) :: {:ok, Instance.t()} | {:error, term()}
+  @spec get_instance(String.t(), String.t()) :: {:ok, %Instance{}} | {:error, term()}
   def get_instance(project_id, instance_id) do
     operation = fn channel ->
       request = %GetInstanceRequest{
@@ -147,7 +147,7 @@ defmodule MegasPinakas.InstanceAdmin do
       {:ok, response} = MegasPinakas.InstanceAdmin.list_instances("project")
   """
   @spec list_instances(String.t(), keyword()) ::
-          {:ok, ListInstancesResponse.t()} | {:error, term()}
+          {:ok, %ListInstancesResponse{}} | {:error, term()}
   def list_instances(project_id, opts \\ []) do
     operation = fn channel ->
       request = %ListInstancesRequest{
@@ -292,7 +292,7 @@ defmodule MegasPinakas.InstanceAdmin do
       {:ok, cluster} = MegasPinakas.InstanceAdmin.get_cluster("project", "instance", "cluster")
   """
   @spec get_cluster(String.t(), String.t(), String.t()) ::
-          {:ok, Cluster.t()} | {:error, term()}
+          {:ok, %Cluster{}} | {:error, term()}
   def get_cluster(project_id, instance_id, cluster_id) do
     operation = fn channel ->
       request = %GetClusterRequest{
@@ -318,7 +318,7 @@ defmodule MegasPinakas.InstanceAdmin do
       {:ok, response} = MegasPinakas.InstanceAdmin.list_clusters("project", "instance")
   """
   @spec list_clusters(String.t(), String.t(), keyword()) ::
-          {:ok, ListClustersResponse.t()} | {:error, term()}
+          {:ok, %ListClustersResponse{}} | {:error, term()}
   def list_clusters(project_id, instance_id, opts \\ []) do
     operation = fn channel ->
       request = %ListClustersRequest{
@@ -498,7 +498,7 @@ defmodule MegasPinakas.InstanceAdmin do
         })
   """
   @spec create_app_profile(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, AppProfile.t()} | {:error, term()}
+          {:ok, %AppProfile{}} | {:error, term()}
   def create_app_profile(project_id, instance_id, app_profile_id, opts \\ []) do
     request = create_app_profile_request(project_id, instance_id, app_profile_id, opts)
 
@@ -541,7 +541,7 @@ defmodule MegasPinakas.InstanceAdmin do
       {:ok, profile} = MegasPinakas.InstanceAdmin.get_app_profile("project", "instance", "profile")
   """
   @spec get_app_profile(String.t(), String.t(), String.t()) ::
-          {:ok, AppProfile.t()} | {:error, term()}
+          {:ok, %AppProfile{}} | {:error, term()}
   def get_app_profile(project_id, instance_id, app_profile_id) do
     operation = fn channel ->
       request = %GetAppProfileRequest{
@@ -568,7 +568,7 @@ defmodule MegasPinakas.InstanceAdmin do
       {:ok, response} = MegasPinakas.InstanceAdmin.list_app_profiles("project", "instance")
   """
   @spec list_app_profiles(String.t(), String.t(), keyword()) ::
-          {:ok, ListAppProfilesResponse.t()} | {:error, term()}
+          {:ok, %ListAppProfilesResponse{}} | {:error, term()}
   def list_app_profiles(project_id, instance_id, opts \\ []) do
     operation = fn channel ->
       request = %ListAppProfilesRequest{

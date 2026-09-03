@@ -371,7 +371,7 @@ defmodule MegasPinakas.Counter do
       rule = MegasPinakas.Counter.increment_rule("cf", "views", 1)
   """
   @spec increment_rule(String.t(), String.t(), integer()) ::
-          Google.Bigtable.V2.ReadModifyWriteRule.t()
+          %Google.Bigtable.V2.ReadModifyWriteRule{}
   def increment_rule(family, qualifier, amount) when is_integer(amount) do
     MegasPinakas.increment_rule(family, qualifier, amount)
   end

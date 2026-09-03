@@ -179,7 +179,7 @@ defmodule MegasPinakas.Types do
 
       mutation = MegasPinakas.Types.set_json("cf", "data", %{name: "John"})
   """
-  @spec set_json(String.t(), String.t(), map() | list(), keyword()) :: Mutation.t()
+  @spec set_json(String.t(), String.t(), map() | list(), keyword()) :: %Mutation{}
   def set_json(family, qualifier, data, opts \\ []) when is_map(data) or is_list(data) do
     MegasPinakas.set_cell(family, qualifier, encode(:json, data), opts)
   end
@@ -187,7 +187,7 @@ defmodule MegasPinakas.Types do
   @doc """
   Creates a SetCell mutation with a 64-bit big-endian integer value.
   """
-  @spec set_integer(String.t(), String.t(), integer(), keyword()) :: Mutation.t()
+  @spec set_integer(String.t(), String.t(), integer(), keyword()) :: %Mutation{}
   def set_integer(family, qualifier, integer, opts \\ []) when is_integer(integer) do
     MegasPinakas.set_cell(family, qualifier, encode(:integer, integer), opts)
   end
@@ -195,7 +195,7 @@ defmodule MegasPinakas.Types do
   @doc """
   Creates a SetCell mutation with a 64-bit float value.
   """
-  @spec set_float(String.t(), String.t(), float(), keyword()) :: Mutation.t()
+  @spec set_float(String.t(), String.t(), float(), keyword()) :: %Mutation{}
   def set_float(family, qualifier, float, opts \\ []) when is_float(float) do
     MegasPinakas.set_cell(family, qualifier, encode(:float, float), opts)
   end
@@ -203,7 +203,7 @@ defmodule MegasPinakas.Types do
   @doc """
   Creates a SetCell mutation with a boolean value.
   """
-  @spec set_boolean(String.t(), String.t(), boolean(), keyword()) :: Mutation.t()
+  @spec set_boolean(String.t(), String.t(), boolean(), keyword()) :: %Mutation{}
   def set_boolean(family, qualifier, bool, opts \\ []) when is_boolean(bool) do
     MegasPinakas.set_cell(family, qualifier, encode(:boolean, bool), opts)
   end
@@ -211,7 +211,7 @@ defmodule MegasPinakas.Types do
   @doc """
   Creates a SetCell mutation with a DateTime value (microseconds since epoch).
   """
-  @spec set_datetime(String.t(), String.t(), DateTime.t(), keyword()) :: Mutation.t()
+  @spec set_datetime(String.t(), String.t(), DateTime.t(), keyword()) :: %Mutation{}
   def set_datetime(family, qualifier, %DateTime{} = datetime, opts \\ []) do
     MegasPinakas.set_cell(family, qualifier, encode(:datetime, datetime), opts)
   end
@@ -219,7 +219,7 @@ defmodule MegasPinakas.Types do
   @doc """
   Creates a SetCell mutation with any Elixir term (via erlang term_to_binary).
   """
-  @spec set_term(String.t(), String.t(), term(), keyword()) :: Mutation.t()
+  @spec set_term(String.t(), String.t(), term(), keyword()) :: %Mutation{}
   def set_term(family, qualifier, term, opts \\ []) do
     MegasPinakas.set_cell(family, qualifier, encode(:term, term), opts)
   end

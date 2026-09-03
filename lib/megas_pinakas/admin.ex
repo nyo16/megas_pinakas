@@ -94,7 +94,7 @@ defmodule MegasPinakas.Admin do
         })
   """
   @spec create_table(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, Table.t()} | {:error, term()}
+          {:ok, %Table{}} | {:error, term()}
   def create_table(project_id, instance_id, table_id, opts \\ []) do
     column_families = build_column_families(Keyword.get(opts, :column_families, %{}))
     initial_splits = build_initial_splits(Keyword.get(opts, :initial_splits, []))
@@ -128,7 +128,7 @@ defmodule MegasPinakas.Admin do
       {:ok, response} = MegasPinakas.Admin.list_tables("project", "instance")
   """
   @spec list_tables(String.t(), String.t(), keyword()) ::
-          {:ok, ListTablesResponse.t()} | {:error, term()}
+          {:ok, %ListTablesResponse{}} | {:error, term()}
   def list_tables(project_id, instance_id, opts \\ []) do
     operation = fn channel ->
       request = %ListTablesRequest{
@@ -157,7 +157,7 @@ defmodule MegasPinakas.Admin do
       {:ok, table} = MegasPinakas.Admin.get_table("project", "instance", "my-table")
   """
   @spec get_table(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, Table.t()} | {:error, term()}
+          {:ok, %Table{}} | {:error, term()}
   def get_table(project_id, instance_id, table_id, opts \\ []) do
     operation = fn channel ->
       request = %GetTableRequest{
@@ -221,8 +221,8 @@ defmodule MegasPinakas.Admin do
           String.t(),
           String.t(),
           String.t(),
-          [ModifyColumnFamiliesRequest.Modification.t()]
-        ) :: {:ok, Table.t()} | {:error, term()}
+          [%ModifyColumnFamiliesRequest.Modification{}]
+        ) :: {:ok, %Table{}} | {:error, term()}
   def modify_column_families(project_id, instance_id, table_id, modifications) do
     operation = fn channel ->
       request = %ModifyColumnFamiliesRequest{
@@ -332,7 +332,7 @@ defmodule MegasPinakas.Admin do
       {:ok, backup} = MegasPinakas.Admin.get_backup("project", "instance", "cluster", "my-backup")
   """
   @spec get_backup(String.t(), String.t(), String.t(), String.t()) ::
-          {:ok, Backup.t()} | {:error, term()}
+          {:ok, %Backup{}} | {:error, term()}
   def get_backup(project_id, instance_id, cluster_id, backup_id) do
     operation = fn channel ->
       request = %GetBackupRequest{
@@ -361,7 +361,7 @@ defmodule MegasPinakas.Admin do
       {:ok, response} = MegasPinakas.Admin.list_backups("project", "instance", "cluster")
   """
   @spec list_backups(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, ListBackupsResponse.t()} | {:error, term()}
+          {:ok, %ListBackupsResponse{}} | {:error, term()}
   def list_backups(project_id, instance_id, cluster_id, opts \\ []) do
     operation = fn channel ->
       request = %ListBackupsRequest{
@@ -573,8 +573,8 @@ defmodule MegasPinakas.Admin do
 
       MegasPinakas.Admin.create_column_family("cf", max_versions_gc_rule(1))
   """
-  @spec create_column_family(String.t(), GcRule.t() | nil) ::
-          ModifyColumnFamiliesRequest.Modification.t()
+  @spec create_column_family(String.t(), %GcRule{} | nil) ::
+          %ModifyColumnFamiliesRequest.Modification{}
   def create_column_family(family_name, gc_rule \\ nil) do
     %ModifyColumnFamiliesRequest.Modification{
       id: family_name,
@@ -589,8 +589,8 @@ defmodule MegasPinakas.Admin do
 
       MegasPinakas.Admin.update_column_family("cf", max_age_gc_rule(86400))
   """
-  @spec update_column_family(String.t(), GcRule.t() | nil) ::
-          ModifyColumnFamiliesRequest.Modification.t()
+  @spec update_column_family(String.t(), %GcRule{} | nil) ::
+          %ModifyColumnFamiliesRequest.Modification{}
   def update_column_family(family_name, gc_rule \\ nil) do
     %ModifyColumnFamiliesRequest.Modification{
       id: family_name,
@@ -605,7 +605,7 @@ defmodule MegasPinakas.Admin do
 
       MegasPinakas.Admin.drop_column_family("old_cf")
   """
-  @spec drop_column_family(String.t()) :: ModifyColumnFamiliesRequest.Modification.t()
+  @spec drop_column_family(String.t()) :: %ModifyColumnFamiliesRequest.Modification{}
   def drop_column_family(family_name) do
     %ModifyColumnFamiliesRequest.Modification{
       id: family_name,
@@ -625,7 +625,7 @@ defmodule MegasPinakas.Admin do
       MegasPinakas.Admin.max_versions_gc_rule(1)  # Keep only latest version
       MegasPinakas.Admin.max_versions_gc_rule(3)  # Keep last 3 versions
   """
-  @spec max_versions_gc_rule(integer()) :: GcRule.t()
+  @spec max_versions_gc_rule(integer()) :: %GcRule{}
   def max_versions_gc_rule(max_num_versions) do
     %GcRule{rule: {:max_num_versions, max_num_versions}}
   end
@@ -640,7 +640,7 @@ defmodule MegasPinakas.Admin do
       MegasPinakas.Admin.max_age_gc_rule(86400)    # 1 day
       MegasPinakas.Admin.max_age_gc_rule(604800)   # 1 week
   """
-  @spec max_age_gc_rule(integer()) :: GcRule.t()
+  @spec max_age_gc_rule(integer()) :: %GcRule{}
   def max_age_gc_rule(max_age_seconds) do
     duration = %Google.Protobuf.Duration{
       seconds: max_age_seconds,
@@ -663,7 +663,7 @@ defmodule MegasPinakas.Admin do
         MegasPinakas.Admin.max_age_gc_rule(604800)
       ])
   """
-  @spec intersection_gc_rule([GcRule.t()]) :: GcRule.t()
+  @spec intersection_gc_rule([%GcRule{}]) :: %GcRule{}
   def intersection_gc_rule(rules) do
     %GcRule{rule: {:intersection, %GcRule.Intersection{rules: rules}}}
   end
@@ -681,7 +681,7 @@ defmodule MegasPinakas.Admin do
         MegasPinakas.Admin.max_age_gc_rule(2592000)
       ])
   """
-  @spec union_gc_rule([GcRule.t()]) :: GcRule.t()
+  @spec union_gc_rule([%GcRule{}]) :: %GcRule{}
   def union_gc_rule(rules) do
     %GcRule{rule: {:union, %GcRule.Union{rules: rules}}}
   end

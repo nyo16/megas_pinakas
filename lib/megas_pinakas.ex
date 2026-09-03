@@ -137,7 +137,7 @@ defmodule MegasPinakas do
       end
   """
   @spec read_rows(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, [Row.t()]} | {:error, term()}
+          {:ok, [%Row{}]} | {:error, term()}
   def read_rows(project_id, instance_id, table_id, opts \\ []) do
     max_rows = validate_max_rows!(Keyword.get(opts, :max_rows, :infinity))
     rows_limit = validate_rows_limit!(Keyword.get(opts, :rows_limit, 0))
@@ -218,7 +218,7 @@ defmodule MegasPinakas do
       {:ok, row} = MegasPinakas.read_row("project", "instance", "table", "my-row-key")
   """
   @spec read_row(String.t(), String.t(), String.t(), binary(), keyword()) ::
-          {:ok, Row.t() | nil} | {:error, term()}
+          {:ok, %Row{} | nil} | {:error, term()}
   def read_row(project_id, instance_id, table_id, row_key, opts \\ [])
       when is_binary(row_key) do
     opts =
@@ -258,7 +258,7 @@ defmodule MegasPinakas do
   > rather than when the caller happens to enumerate.
   """
   @spec sample_row_keys(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, [SampleRowKeysResponse.t()]} | {:error, term()}
+          {:ok, [%SampleRowKeysResponse{}]} | {:error, term()}
   def sample_row_keys(project_id, instance_id, table_id, opts \\ []) do
     operation = fn channel ->
       request = %SampleRowKeysRequest{
@@ -296,8 +296,8 @@ defmodule MegasPinakas do
       ]
       {:ok, _} = MegasPinakas.mutate_row("project", "instance", "table", "row-key", mutations)
   """
-  @spec mutate_row(String.t(), String.t(), String.t(), binary(), [Mutation.t()], keyword()) ::
-          {:ok, MutateRowResponse.t()} | {:error, term()}
+  @spec mutate_row(String.t(), String.t(), String.t(), binary(), [%Mutation{}], keyword()) ::
+          {:ok, %MutateRowResponse{}} | {:error, term()}
   def mutate_row(project_id, instance_id, table_id, row_key, mutations, opts \\ [])
       when is_binary(row_key) and is_list(mutations) do
     operation = fn channel ->
@@ -360,7 +360,7 @@ defmodule MegasPinakas do
   > claimed to.
   """
   @spec mutate_rows(String.t(), String.t(), String.t(), [map() | RowBuilder.t()], keyword()) ::
-          {:ok, [MutateRowsResponse.Entry.t()]} | {:error, term()}
+          {:ok, [%MutateRowsResponse.Entry{}]} | {:error, term()}
   def mutate_rows(project_id, instance_id, table_id, entries, opts \\ []) when is_list(entries) do
     request_entries = Enum.map(entries, &to_request_entry!/1)
 
@@ -432,11 +432,11 @@ defmodule MegasPinakas do
           String.t(),
           String.t(),
           binary(),
-          RowFilter.t() | nil,
-          [Mutation.t()],
-          [Mutation.t()],
+          %RowFilter{} | nil,
+          [%Mutation{}],
+          [%Mutation{}],
           keyword()
-        ) :: {:ok, CheckAndMutateRowResponse.t()} | {:error, term()}
+        ) :: {:ok, %CheckAndMutateRowResponse{}} | {:error, term()}
   def check_and_mutate_row(
         project_id,
         instance_id,
@@ -489,9 +489,9 @@ defmodule MegasPinakas do
           String.t(),
           String.t(),
           binary(),
-          [ReadModifyWriteRule.t()],
+          [%ReadModifyWriteRule{}],
           keyword()
-        ) :: {:ok, ReadModifyWriteRowResponse.t()} | {:error, term()}
+        ) :: {:ok, %ReadModifyWriteRowResponse{}} | {:error, term()}
   def read_modify_write_row(project_id, instance_id, table_id, row_key, rules, opts \\ [])
       when is_binary(row_key) and is_list(rules) do
     operation = fn channel ->
@@ -529,7 +529,7 @@ defmodule MegasPinakas do
       MegasPinakas.set_cell("column_family", "column_qualifier", "value")
       MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 1_234_567_890_000)
   """
-  @spec set_cell(String.t(), binary(), binary(), keyword()) :: Mutation.t()
+  @spec set_cell(String.t(), binary(), binary(), keyword()) :: %Mutation{}
   def set_cell(family_name, column_qualifier, value, opts \\ []) do
     timestamp = validate_timestamp_micros!(Keyword.get(opts, :timestamp_micros, -1))
 
@@ -569,7 +569,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.delete_from_column("cf", "col")
   """
-  @spec delete_from_column(String.t(), binary(), keyword()) :: Mutation.t()
+  @spec delete_from_column(String.t(), binary(), keyword()) :: %Mutation{}
   def delete_from_column(family_name, column_qualifier, opts \\ []) do
     time_range = Keyword.get(opts, :time_range)
 
@@ -593,7 +593,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.delete_from_family("cf")
   """
-  @spec delete_from_family(String.t()) :: Mutation.t()
+  @spec delete_from_family(String.t()) :: %Mutation{}
   def delete_from_family(family_name) do
     %Mutation{
       mutation:
@@ -613,7 +613,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.delete_from_row()
   """
-  @spec delete_from_row() :: Mutation.t()
+  @spec delete_from_row() :: %Mutation{}
   def delete_from_row do
     %Mutation{
       mutation: {:delete_from_row, %Mutation.DeleteFromRow{}}
@@ -632,7 +632,7 @@ defmodule MegasPinakas do
       MegasPinakas.increment_rule("cf", "counter", 1)
       MegasPinakas.increment_rule("cf", "counter", -5)
   """
-  @spec increment_rule(String.t(), binary(), integer()) :: ReadModifyWriteRule.t()
+  @spec increment_rule(String.t(), binary(), integer()) :: %ReadModifyWriteRule{}
   def increment_rule(family_name, column_qualifier, increment_amount) do
     %ReadModifyWriteRule{
       family_name: family_name,
@@ -648,7 +648,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.append_rule("cf", "log", "new entry\\n")
   """
-  @spec append_rule(String.t(), binary(), binary()) :: ReadModifyWriteRule.t()
+  @spec append_rule(String.t(), binary(), binary()) :: %ReadModifyWriteRule{}
   def append_rule(family_name, column_qualifier, append_value) do
     %ReadModifyWriteRule{
       family_name: family_name,
@@ -668,7 +668,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.row_set(["row1", "row2", "row3"])
   """
-  @spec row_set([binary()]) :: RowSet.t()
+  @spec row_set([binary()]) :: %RowSet{}
   def row_set(row_keys) when is_list(row_keys) do
     %RowSet{row_keys: row_keys, row_ranges: []}
   end
@@ -681,7 +681,7 @@ defmodule MegasPinakas do
       ranges = [MegasPinakas.row_range("a", "z")]
       MegasPinakas.row_set_from_ranges(ranges)
   """
-  @spec row_set_from_ranges([RowRange.t()]) :: RowSet.t()
+  @spec row_set_from_ranges([%RowRange{}]) :: %RowSet{}
   def row_set_from_ranges(row_ranges) when is_list(row_ranges) do
     %RowSet{row_keys: [], row_ranges: row_ranges}
   end
@@ -693,7 +693,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.row_range("user#100", "user#200")
   """
-  @spec row_range(binary(), binary()) :: RowRange.t()
+  @spec row_range(binary(), binary()) :: %RowRange{}
   def row_range(start_key, end_key) do
     %RowRange{
       start_key: {:start_key_closed, start_key},
@@ -715,7 +715,7 @@ defmodule MegasPinakas do
       MegasPinakas.row_range_prefix("user#")
       # => %RowRange{start_key: {:start_key_closed, "user#"}, end_key: {:end_key_open, "user$"}}
   """
-  @spec row_range_prefix(binary()) :: RowRange.t()
+  @spec row_range_prefix(binary()) :: %RowRange{}
   def row_range_prefix(prefix) when is_binary(prefix) do
     end_key =
       case calculate_prefix_end(prefix) do
@@ -733,7 +733,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.row_range_open("user#100", "user#200")
   """
-  @spec row_range_open(binary(), binary()) :: RowRange.t()
+  @spec row_range_open(binary(), binary()) :: %RowRange{}
   def row_range_open(start_key, end_key) do
     %RowRange{
       start_key: {:start_key_open, start_key},
@@ -748,7 +748,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.row_range_closed("user#100", "user#200")
   """
-  @spec row_range_closed(binary(), binary()) :: RowRange.t()
+  @spec row_range_closed(binary(), binary()) :: %RowRange{}
   def row_range_closed(start_key, end_key) do
     %RowRange{
       start_key: {:start_key_closed, start_key},
@@ -763,7 +763,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.row_range_open_closed("user#100", "user#200")
   """
-  @spec row_range_open_closed(binary(), binary()) :: RowRange.t()
+  @spec row_range_open_closed(binary(), binary()) :: %RowRange{}
   def row_range_open_closed(start_key, end_key) do
     %RowRange{
       start_key: {:start_key_open, start_key},
@@ -778,7 +778,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.row_range_from("user#500")
   """
-  @spec row_range_from(binary()) :: RowRange.t()
+  @spec row_range_from(binary()) :: %RowRange{}
   def row_range_from(start_key) do
     %RowRange{
       start_key: {:start_key_closed, start_key},
@@ -793,7 +793,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.row_range_until("user#500")
   """
-  @spec row_range_until(binary()) :: RowRange.t()
+  @spec row_range_until(binary()) :: %RowRange{}
   def row_range_until(end_key) do
     %RowRange{
       start_key: nil,
@@ -808,7 +808,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.row_range_unbounded()
   """
-  @spec row_range_unbounded() :: RowRange.t()
+  @spec row_range_unbounded() :: %RowRange{}
   def row_range_unbounded do
     %RowRange{
       start_key: nil,
@@ -832,7 +832,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.column_filter("cf", "col")
   """
-  @spec column_filter(String.t(), String.t()) :: RowFilter.t()
+  @spec column_filter(String.t(), String.t()) :: %RowFilter{}
   defdelegate column_filter(family_name, column_qualifier), to: Filter
 
   @doc """
@@ -842,7 +842,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.family_filter("cf")
   """
-  @spec family_filter(String.t()) :: RowFilter.t()
+  @spec family_filter(String.t()) :: %RowFilter{}
   defdelegate family_filter(family_name), to: Filter
 
   @doc """
@@ -852,7 +852,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.cells_per_column_limit_filter(1)
   """
-  @spec cells_per_column_limit_filter(pos_integer()) :: RowFilter.t()
+  @spec cells_per_column_limit_filter(pos_integer()) :: %RowFilter{}
   defdelegate cells_per_column_limit_filter(limit), to: Filter
 
   @doc """
@@ -862,7 +862,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.pass_all_filter()
   """
-  @spec pass_all_filter() :: RowFilter.t()
+  @spec pass_all_filter() :: %RowFilter{}
   defdelegate pass_all_filter(), to: Filter
 
   @doc """
@@ -872,7 +872,7 @@ defmodule MegasPinakas do
 
       MegasPinakas.block_all_filter()
   """
-  @spec block_all_filter() :: RowFilter.t()
+  @spec block_all_filter() :: %RowFilter{}
   defdelegate block_all_filter(), to: Filter
 
   @doc """
@@ -886,7 +886,7 @@ defmodule MegasPinakas do
       ]
       MegasPinakas.chain_filters(filters)
   """
-  @spec chain_filters([RowFilter.t()]) :: RowFilter.t()
+  @spec chain_filters([%RowFilter{}]) :: %RowFilter{}
   defdelegate chain_filters(filters), to: Filter
 
   @doc """
@@ -900,7 +900,7 @@ defmodule MegasPinakas do
       ]
       MegasPinakas.interleave_filters(filters)
   """
-  @spec interleave_filters([RowFilter.t()]) :: RowFilter.t()
+  @spec interleave_filters([%RowFilter{}]) :: %RowFilter{}
   defdelegate interleave_filters(filters), to: Filter
 
   # ============================================================================
@@ -980,7 +980,7 @@ defmodule MegasPinakas do
       %{"cf" => %{"name" => "John Doe", "email" => "john@example.com"}}
 
   """
-  @spec row_to_map(Row.t()) :: map()
+  @spec row_to_map(%Row{}) :: map()
   def row_to_map(%Row{families: families}) do
     Map.new(families, fn %{name: family_name, columns: columns} ->
       {family_name, columns_to_map(columns)}
@@ -1001,7 +1001,7 @@ defmodule MegasPinakas do
       "John Doe"
 
   """
-  @spec get_cell(Row.t() | nil, String.t(), String.t()) :: binary() | nil
+  @spec get_cell(%Row{} | nil, String.t(), String.t()) :: binary() | nil
   def get_cell(%Row{families: families}, family, qualifier) do
     with %{columns: columns} <- Enum.find(families, &(&1.name == family)),
          %{cells: [%{value: value} | _]} <- Enum.find(columns, &(&1.qualifier == qualifier)) do
@@ -1026,7 +1026,7 @@ defmodule MegasPinakas do
       [%{value: "John Doe", timestamp: 1765323352546000}]
 
   """
-  @spec get_cells(Row.t() | nil, String.t(), String.t()) :: [map()]
+  @spec get_cells(%Row{} | nil, String.t(), String.t()) :: [map()]
   def get_cells(%Row{families: families}, family, qualifier) do
     with %{columns: columns} <- Enum.find(families, &(&1.name == family)),
          %{cells: cells} <- Enum.find(columns, &(&1.qualifier == qualifier)) do
@@ -1052,7 +1052,7 @@ defmodule MegasPinakas do
       %{"name" => "John Doe", "email" => "john@example.com"}
 
   """
-  @spec get_family(Row.t() | nil, String.t()) :: map()
+  @spec get_family(%Row{} | nil, String.t()) :: map()
   def get_family(%Row{families: families}, family) do
     case Enum.find(families, &(&1.name == family)) do
       %{columns: columns} -> columns_to_map(columns)
@@ -1072,7 +1072,7 @@ defmodule MegasPinakas do
       "user#123"
 
   """
-  @spec row_key(Row.t() | nil) :: binary() | nil
+  @spec row_key(%Row{} | nil) :: binary() | nil
   def row_key(%Row{key: key}), do: key
   def row_key(nil), do: nil
 
@@ -1091,7 +1091,7 @@ defmodule MegasPinakas do
       ]
 
   """
-  @spec rows_to_list([Row.t()]) :: [map()]
+  @spec rows_to_list([%Row{}]) :: [map()]
   def rows_to_list(rows) when is_list(rows) do
     Enum.map(rows, fn row ->
       %{key: row_key(row), data: row_to_map(row)}

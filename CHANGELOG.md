@@ -17,8 +17,8 @@ run on a second connection pool, `MegasPinakas.AdminConnectionPool`, pointed at
 `bigtableadmin.googleapis.com`. Previously every admin RPC went to the Data API
 host, which answers them with `UNIMPLEMENTED` — **no admin call has ever worked
 against real BigTable**. In emulator mode both pools point at the emulator.
-`Config.build_admin_pool_config/0`, `Config.admin_endpoint/0` and
-`Client.admin_pool/0` are new; the admin pool is always built from
+`MegasPinakas.Config.build_admin_pool_config/0`, `MegasPinakas.Config.admin_endpoint/0`
+and `MegasPinakas.Client.admin_pool/0` are new; the admin pool is always built from
 `:default_pool_size` and the emulator settings, never from the
 `GrpcConnectionPool` key.
 
@@ -54,7 +54,7 @@ exactly. Cache cells written by 0.6.x are not readable through `Cache`
 (`get/5` returns `{:error, :unsafe_or_invalid_term}`); rewrite or drop them.
 `Cache.exists?/5` returns `{:ok, boolean()} | {:error, term()}` instead of a bare
 boolean, so transport errors are no longer reported as `false`.
-`Cache.increment/6` and `Cache.append/6` were removed — they wrote bytes `get`
+`MegasPinakas.Cache.increment` and `MegasPinakas.Cache.append` were removed — they wrote bytes `get`
 could not decode. Use `MegasPinakas.Counter` or `read_modify_write_row/6`.
 
 **`Counter.increment_if_exists/8` is now a compare-and-swap increment.** It adds
@@ -85,7 +85,7 @@ outside the signed 64-bit range instead of silently truncating.
 `{:error, {:incomplete_read, {status_atom, message}}}` instead of wrapping a raw
 `%GRPC.RPCError{}`.
 
-**Removed:** `MegasPinakas.RowAssembler.stream_transform/1` (dead code;
+**Removed:** `MegasPinakas.RowAssembler.stream_transform` (dead code;
 `Streaming` never used it).
 
 Telemetry:
@@ -214,12 +214,13 @@ Other contract changes:
 - `MegasPinakas.Response.normalize_reason/1` — normalizes a bare
   `%GRPC.RPCError{}` into `{status_atom, message}`; `format/1` delegates to it.
 - `MegasPinakas.AuthError` and `MegasPinakas.Error` exceptions.
-- `Config.project_path/1`, `Config.location_path/2`, `Config.admin_endpoint/0`,
-  `Config.build_admin_pool_config/0`; `Client.admin_pool/0`.
+- `MegasPinakas.Config.project_path/1`, `MegasPinakas.Config.location_path/2`,
+  `MegasPinakas.Config.admin_endpoint/0`, `MegasPinakas.Config.build_admin_pool_config/0`;
+  `MegasPinakas.Client.admin_pool/0`.
 - `Filter.row_sample_filter/1` accepts any `number()` strictly between 0 and 1
   and always emits a float; `0` and `1` are rejected client-side because
   BigTable answers them with `INVALID_ARGUMENT`.
-- `Config.emulator?/0` is also true when the `GrpcConnectionPool` data endpoint
+- `MegasPinakas.Config.emulator?/0` is also true when the `GrpcConnectionPool` data endpoint
   is `type: :local`; the admin pool follows that endpoint too.
 
 ### Changed
@@ -249,8 +250,8 @@ Other contract changes:
 - `TimeSeries` doc examples use real 19-digit reverse-timestamp values.
 
 ### Removed
-- `MegasPinakas.Cache.increment/6`, `MegasPinakas.Cache.append/6` (see Breaking).
-- `MegasPinakas.RowAssembler.stream_transform/1` (see Breaking).
+- `MegasPinakas.Cache.increment`, `MegasPinakas.Cache.append` (see Breaking).
+- `MegasPinakas.RowAssembler.stream_transform` (see Breaking).
 - `MegasPinakas.Test.Emulator.running?/0`.
 - The duplicate `BIGTABLE_EMULATOR_HOST` parser in `config/runtime.exs`.
 
@@ -298,7 +299,7 @@ Other contract changes:
 - `extract_counter_value/3` is shared by `Counter` and `CounterTTL` rather than
   duplicated verbatim in both.
 - Row-key splitting shared by `CounterTTL` and `TimeSeries` moved into
-  `MegasPinakas.RowKey`.
+  MegasPinakas.RowKey (internal, undocumented).
 - The token-expiry clock has a single implementation in `MegasPinakas.Auth.Cache`.
 
 ### Dependencies
@@ -358,7 +359,7 @@ Measured with Benchee on an Apple M4 Max against the BigTable emulator
 - `:rows_limit` option on `Streaming.stream_rows/4` — now honoured (see Fixed)
 - Telemetry events `[:megas_pinakas, :stream, :start | :stop | :cancelled]` for lazily-consumed streams, with `duration`, `rows_emitted` and `batches`. A stream consumed at the caller's pace has no single duration a request span can represent, and `:cancelled` distinguishes early abandonment from exhaustion
 - `MegasPinakas.Response` — normalizes gRPC responses into idiomatic `{:ok, result} | {:error, {atom, msg}}` tuples, mapping all 17 gRPC status codes to descriptive atoms
-- Configurable gRPC timeout (default 30s) via `Config.default_timeout/0` and `:default_timeout` app config
+- Configurable gRPC timeout (default 30s) via `MegasPinakas.Config.default_timeout/0` and `:default_timeout` app config
 - Telemetry events: `[:megas_pinakas, :request, :start | :stop | :exception]` with duration and pool metadata
 - GitHub Actions CI pipeline — compile, format, credo, test, dialyzer, auto-publish to hex on version tags
 - Guard clauses on `mutate_row/6` and `read_row/5`
