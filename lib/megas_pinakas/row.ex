@@ -73,6 +73,10 @@ defmodule MegasPinakas.Row do
   - `boolean` -> single byte (<<1>> or <<0>>)
   - `%DateTime{}` -> microseconds since epoch
 
+  Anything else (atoms including `nil`, tuples, pids, ...) has no unambiguous
+  cell encoding and raises `ArgumentError`; use `put_term/5` or one of the
+  explicit `put_*/5` builders instead.
+
   ## Examples
 
       row
@@ -110,6 +114,12 @@ defmodule MegasPinakas.Row do
   def put(%__MODULE__{} = row, family, qualifier, value, opts)
       when is_map(value) or is_list(value) do
     put_json(row, family, qualifier, value, opts)
+  end
+
+  def put(%__MODULE__{}, _family, _qualifier, value, _opts) do
+    raise ArgumentError,
+          "cannot infer a cell type for #{inspect(value)}; use put_term/5 for atoms, " <>
+            "tuples, and other Erlang terms, or an explicit put_*/5"
   end
 
   # ============================================================================

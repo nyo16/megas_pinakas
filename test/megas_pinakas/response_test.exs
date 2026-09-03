@@ -61,6 +61,32 @@ defmodule MegasPinakas.ResponseTest do
     end
   end
 
+  describe "normalize_reason/1" do
+    test "converts a GRPC.RPCError to {status_atom, message}" do
+      assert Response.normalize_reason(%GRPC.RPCError{status: 14, message: "down"}) ==
+               {:unavailable, "down"}
+    end
+
+    test "maps an unknown status code to :unknown" do
+      assert Response.normalize_reason(%GRPC.RPCError{status: 99, message: "wat"}) ==
+               {:unknown, "wat"}
+    end
+
+    test "passes every other term through untouched" do
+      assert Response.normalize_reason(:timeout) == :timeout
+
+      assert Response.normalize_reason({:not_found, "already normalized"}) ==
+               {:not_found, "already normalized"}
+
+      assert Response.normalize_reason("raw") == "raw"
+    end
+
+    test "is what format/1 applies to error tuples" do
+      error = %GRPC.RPCError{status: 7, message: "denied"}
+      assert Response.format({:error, error}) == {:error, Response.normalize_reason(error)}
+    end
+  end
+
   describe "status_to_atom/1" do
     test "maps known codes" do
       assert Response.status_to_atom(0) == :ok

@@ -52,13 +52,31 @@ defmodule MegasPinakas.Response do
   @spec format(term()) :: {:ok, term()} | {:error, term()}
   def format({:ok, result}), do: {:ok, result}
   def format({:ok, result, _headers}), do: {:ok, result}
+  def format({:error, reason}), do: {:error, normalize_reason(reason)}
+  def format(other), do: {:error, {:unexpected_response, other}}
 
-  def format({:error, %GRPC.RPCError{status: status, message: message}}) do
-    {:error, {status_to_atom(status), message}}
+  @doc """
+  Normalizes a bare error reason.
+
+  `%GRPC.RPCError{}` becomes `{status_atom, message}`; every other term is
+  returned unchanged. Use this on error elements that surface *inside* a
+  streaming response (where `format/1` never sees them) so callers observe
+  the same `{status_atom, message}` shape as unary failures.
+
+  ## Examples
+
+      iex> MegasPinakas.Response.normalize_reason(%GRPC.RPCError{status: 14, message: "down"})
+      {:unavailable, "down"}
+
+      iex> MegasPinakas.Response.normalize_reason(:timeout)
+      :timeout
+  """
+  @spec normalize_reason(term()) :: term()
+  def normalize_reason(%GRPC.RPCError{status: status, message: message}) do
+    {status_to_atom(status), message}
   end
 
-  def format({:error, reason}), do: {:error, reason}
-  def format(other), do: {:error, {:unexpected_response, other}}
+  def normalize_reason(reason), do: reason
 
   @doc """
   Converts a gRPC status code integer to a descriptive atom.

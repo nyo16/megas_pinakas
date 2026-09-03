@@ -1,4 +1,13 @@
 defmodule MegasPinakas.Auth.Cache do
+  # Refresh once the token has less than this much life left, so callers are
+  # never handed a token that expires mid-flight.
+  @refresh_margin_seconds 60
+
+  # How long a refresh failure is served from the table before the source is
+  # tried again. Long enough to absorb a burst of RPCs, short enough that a
+  # fixed credential is picked up promptly.
+  @failure_ttl_seconds 5
+
   @moduledoc """
   Caches the OAuth access token used to authenticate BigTable RPCs.
 
@@ -11,7 +20,7 @@ defmodule MegasPinakas.Auth.Cache do
 
   Reads are lock-free. `fetch_token/1` does a plain `:ets.lookup/2` against a
   `read_concurrency: true` table and returns immediately when the cached token
-  has more than #{60} seconds of life left. No message passes through the
+  has more than #{@refresh_margin_seconds} seconds of life left. No message passes through the
   GenServer on the hot path.
 
   ## Refresh path
@@ -21,6 +30,18 @@ defmodule MegasPinakas.Auth.Cache do
   fetching, N concurrent callers arriving at expiry trigger **one** token fetch
   rather than N. Without that re-check, token expiry under load would produce a
   thundering herd of ~900 ms `gcloud` subprocess spawns.
+
+  ## Failures
+
+  The token source runs inside this process, so it is wrapped: an exception,
+  exit, or throw from the source becomes `{:error, {:token_source_error, msg}}`
+  or `{:error, {:token_source_exit, kind, reason}}` instead of crashing the
+  cache (and, with it, every in-flight RPC waiting on the refresh).
+
+  A failure is remembered for #{@failure_ttl_seconds} seconds. During that window `fetch_token/1`
+  returns the cached `{:error, reason}` without touching the source, so a broken
+  credential does not re-run a ~1 s subprocess — or emit a log line — per RPC.
+  `invalidate/1` clears it.
 
   ## Expiry
 
@@ -37,10 +58,6 @@ defmodule MegasPinakas.Auth.Cache do
 
   @table __MODULE__
 
-  # Refresh once the token has less than this much life left, so callers are
-  # never handed a token that expires mid-flight.
-  @refresh_margin_seconds 60
-
   # A refresh may shell out to gcloud, which was measured at 0.85-1.11 s.
   @refresh_timeout 30_000
 
@@ -53,60 +70,75 @@ defmodule MegasPinakas.Auth.Cache do
   @doc """
   Returns a cached access token, refreshing it if absent or near expiry.
 
-  Returns `{:error, reason}` when no token can be obtained.
+  Returns `{:error, reason}` when no token can be obtained. The error is cached
+  for a few seconds (see the moduledoc), so repeated calls do not repeatedly
+  invoke a failing token source.
   """
   @spec fetch_token(GenServer.server()) :: {:ok, String.t()} | {:error, term()}
   def fetch_token(server \\ __MODULE__) do
     case lookup_valid() do
-      {:ok, token} -> {:ok, token}
       :stale -> request_refresh(server)
+      result -> result
     end
   end
 
   @doc """
-  Drops any cached token so the next `fetch_token/1` refetches.
+  Drops any cached token *and* any remembered failure so the next
+  `fetch_token/1` refetches.
 
   Intended for tests and for recovering from a token revoked server-side.
+  Returns `:ok` when the cache is not running; there is nothing to drop.
   """
   @spec invalidate(GenServer.server()) :: :ok
   def invalidate(server \\ __MODULE__) do
     case :ets.whereis(@table) do
       :undefined -> :ok
-      _tid -> GenServer.call(server, :invalidate)
+      _tid -> GenServer.call(server, :invalidate, @refresh_timeout)
     end
+  catch
+    :exit, {:noproc, _} -> :ok
   end
 
   @doc """
-  Returns the cached entry as `{:ok, token, expires_at}`, or `:error`.
+  Returns the cached token as `{:ok, token, expires_at}`, or `:error`.
 
-  Exposed for tests and diagnostics; does not trigger a refresh.
+  Exposed for tests and diagnostics; does not trigger a refresh and does not
+  report remembered failures.
   """
   @spec peek() :: {:ok, String.t(), non_neg_integer()} | :error
   def peek do
-    case :ets.whereis(@table) do
-      :undefined ->
-        :error
-
-      tid ->
-        case :ets.lookup(tid, :token) do
-          [{:token, token, expires_at}] -> {:ok, token, expires_at}
-          [] -> :error
-        end
+    case :ets.lookup(@table, :token) do
+      [{:token, token, expires_at}] -> {:ok, token, expires_at}
+      [] -> :error
     end
+  rescue
+    # The table is owned by the GenServer; it vanishes if the cache is down.
+    ArgumentError -> :error
   end
 
   # ==========================================================================
   # Read path — no GenServer involvement
   # ==========================================================================
 
+  # A stale token stays in the table when its refresh fails, so the failure
+  # must be consulted whenever the token is unusable — not only when absent —
+  # or a stale token would keep re-triggering the refresh the failure suppresses.
   defp lookup_valid do
-    case peek() do
-      {:ok, token, expires_at} ->
-        if expires_at - now() > @refresh_margin_seconds, do: {:ok, token}, else: :stale
+    now = now()
 
-      :error ->
-        :stale
+    case peek() do
+      {:ok, token, expires_at} when expires_at - now > @refresh_margin_seconds -> {:ok, token}
+      _ -> recent_failure(now)
     end
+  end
+
+  defp recent_failure(now) do
+    case :ets.lookup(@table, :failure) do
+      [{:failure, reason, until}] when until > now -> {:error, reason}
+      _ -> :stale
+    end
+  rescue
+    ArgumentError -> :stale
   end
 
   defp request_refresh(server) do
@@ -122,7 +154,7 @@ defmodule MegasPinakas.Auth.Cache do
       until the cache is running.
       """)
 
-      case Auth.fetch_fresh_token() do
+      case fetch_from_source() do
         {:ok, %{token: token}} -> {:ok, token}
         {:error, reason} -> {:error, reason}
       end
@@ -147,29 +179,53 @@ defmodule MegasPinakas.Auth.Cache do
   @impl true
   def handle_call(:refresh, _from, state) do
     # Re-check before fetching. Callers that queued behind an in-flight refresh
-    # find a fresh token here, which is what collapses N concurrent misses into
-    # a single token fetch.
+    # find a fresh token (or its fresh failure) here, which is what collapses N
+    # concurrent misses into a single token fetch.
     case lookup_valid() do
-      {:ok, token} -> {:reply, {:ok, token}, state}
       :stale -> {:reply, do_refresh(), state}
+      result -> {:reply, result, state}
     end
   end
 
   @impl true
   def handle_call(:invalidate, _from, state) do
-    :ets.delete(@table, :token)
+    :ets.delete_all_objects(@table)
     {:reply, :ok, state}
   end
 
   defp do_refresh do
-    case Auth.fetch_fresh_token() do
+    case fetch_from_source() do
       {:ok, %{token: token, expires_at: expires_at}} ->
+        :ets.delete(@table, :failure)
         :ets.insert(@table, {:token, token, expires_at})
         {:ok, token}
 
       {:error, reason} ->
+        :ets.insert(@table, {:failure, reason, now() + @failure_ttl_seconds})
         {:error, reason}
     end
+  end
+
+  # Total wrapper around the token source: whatever it does — raise, exit,
+  # throw, or return garbage — comes back as a tuple.
+  @spec fetch_from_source() ::
+          {:ok, %{token: String.t(), expires_at: integer()}} | {:error, term()}
+  defp fetch_from_source do
+    case Auth.fetch_fresh_token() do
+      {:ok, %{token: token, expires_at: expires_at}} = ok
+      when is_binary(token) and is_integer(expires_at) ->
+        ok
+
+      {:error, _reason} = error ->
+        error
+
+      other ->
+        {:error, {:invalid_token_source_result, other}}
+    end
+  rescue
+    e -> {:error, {:token_source_error, Exception.message(e)}}
+  catch
+    kind, reason -> {:error, {:token_source_exit, kind, reason}}
   end
 
   # The single clock behind token expiry. `MegasPinakas.Auth` stamps `expires_at`

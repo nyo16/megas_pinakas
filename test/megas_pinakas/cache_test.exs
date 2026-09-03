@@ -1,68 +1,215 @@
 defmodule MegasPinakas.CacheTest do
-  use ExUnit.Case, async: true
+  @moduledoc """
+  Emulator-backed contract tests for `MegasPinakas.Cache`: any term roundtrips,
+  TTL is enforced on read, and errors propagate instead of masquerading as
+  misses.
+  """
+
+  use ExUnit.Case, async: false
 
   alias MegasPinakas.Cache
+  alias MegasPinakas.Test.Emulator
 
-  describe "module structure" do
-    test "exports get function" do
-      functions = Cache.__info__(:functions)
-      assert {:get, 4} in functions
-      assert {:get, 5} in functions
+  @moduletag :emulator
+
+  @table "highlevel_cache_test"
+
+  setup_all do
+    Emulator.setup_table(@table, ["cache"])
+    :ok
+  end
+
+  setup %{test: test} do
+    # Unique key per test so tests never observe each other's entries.
+    {:ok, key: "k:#{test}"}
+  end
+
+  defp put(key, value, opts \\ []),
+    do: Cache.put(Emulator.project(), Emulator.instance(), @table, key, value, opts)
+
+  defp get(key, opts \\ []),
+    do: Cache.get(Emulator.project(), Emulator.instance(), @table, key, opts)
+
+  defp exists?(key), do: Cache.exists?(Emulator.project(), Emulator.instance(), @table, key)
+
+  describe "put/get roundtrip" do
+    test "map with atom keys", %{key: key} do
+      assert {:ok, _} = put(key, %{name: "John", age: 30})
+      assert {:ok, %{name: "John", age: 30}} = get(key)
     end
 
-    test "exports put function" do
-      functions = Cache.__info__(:functions)
-      assert {:put, 5} in functions
-      assert {:put, 6} in functions
+    test "list", %{key: key} do
+      assert {:ok, _} = put(key, [1, "two", :three])
+      assert get(key) == {:ok, [1, "two", :three]}
     end
 
-    test "exports delete function" do
-      functions = Cache.__info__(:functions)
-      assert {:delete, 4} in functions
-      assert {:delete, 5} in functions
+    test "string", %{key: key} do
+      assert {:ok, _} = put(key, "hello")
+      assert get(key) == {:ok, "hello"}
     end
 
-    test "exports get_or_put function" do
-      functions = Cache.__info__(:functions)
-      assert {:get_or_put, 5} in functions
-      assert {:get_or_put, 6} in functions
+    test "integer stays an integer", %{key: key} do
+      assert {:ok, _} = put(key, 42)
+      assert get(key) == {:ok, 42}
     end
 
-    test "exports get_many function" do
-      functions = Cache.__info__(:functions)
-      assert {:get_many, 4} in functions
-      assert {:get_many, 5} in functions
+    test "nil is a stored entry: get reads nil, exists? reports present", %{key: key} do
+      assert {:ok, _} = put(key, nil)
+      assert get(key) == {:ok, nil}
+      assert exists?(key) == {:ok, true}
     end
 
-    test "exports put_many function" do
-      functions = Cache.__info__(:functions)
-      assert {:put_many, 4} in functions
-      assert {:put_many, 5} in functions
+    test "missing key reads as nil and does not exist", %{key: key} do
+      assert get(key) == {:ok, nil}
+      assert exists?(key) == {:ok, false}
     end
 
-    test "exports delete_many function" do
-      functions = Cache.__info__(:functions)
-      assert {:delete_many, 4} in functions
-      assert {:delete_many, 5} in functions
+    test "custom family/qualifier are honoured on both sides", %{key: key} do
+      opts = [qualifier: "alt"]
+      assert {:ok, _} = put(key, :alt, opts)
+      assert get(key, opts) == {:ok, :alt}
+      # The default column was never written.
+      assert get(key) == {:ok, nil}
+    end
+  end
+
+  describe ":ttl" do
+    # ttl: 2 rather than 1: expiry is whole-second, so a 1 s entry written at
+    # S.999 is already expired at S+1.000 and the immediate read could flake.
+    test "entry is readable before expiry and absent after", %{key: key} do
+      assert {:ok, _} = put(key, "ephemeral", ttl: 2)
+      assert get(key) == {:ok, "ephemeral"}
+      assert exists?(key) == {:ok, true}
+
+      Process.sleep(2100)
+
+      assert get(key) == {:ok, nil}
+      assert exists?(key) == {:ok, false}
     end
 
-    test "exports exists? function" do
-      functions = Cache.__info__(:functions)
-      assert {:exists?, 4} in functions
-      assert {:exists?, 5} in functions
+    test "rejects a non-positive or non-integer ttl before any request", %{key: key} do
+      assert_raise ArgumentError, ~r/:ttl must be a positive integer/, fn ->
+        put(key, "x", ttl: 0)
+      end
+
+      assert_raise ArgumentError, fn -> put(key, "x", ttl: "60") end
+    end
+  end
+
+  describe "get_or_put/6" do
+    test "miss computes, stores and returns the value", %{key: key} do
+      assert {:ok, %{computed: true}} =
+               Cache.get_or_put(Emulator.project(), Emulator.instance(), @table, key, fn ->
+                 %{computed: true}
+               end)
+
+      assert get(key) == {:ok, %{computed: true}}
     end
 
-    test "exports increment function" do
-      functions = Cache.__info__(:functions)
-      assert {:increment, 4} in functions
-      assert {:increment, 5} in functions
-      assert {:increment, 6} in functions
+    test "hit returns the cached value without invoking the function", %{key: key} do
+      assert {:ok, _} = put(key, "cached")
+
+      assert {:ok, "cached"} =
+               Cache.get_or_put(Emulator.project(), Emulator.instance(), @table, key, fn ->
+                 flunk("default_fn must not run on a cache hit")
+               end)
     end
 
-    test "exports append function" do
-      functions = Cache.__info__(:functions)
-      assert {:append, 5} in functions
-      assert {:append, 6} in functions
+    test "a stored nil is a hit, so negative results are cached", %{key: key} do
+      assert {:ok, _} = put(key, nil)
+
+      assert {:ok, nil} =
+               Cache.get_or_put(Emulator.project(), Emulator.instance(), @table, key, fn ->
+                 flunk("default_fn must not run for a stored nil")
+               end)
+    end
+
+    test "an expired entry counts as a miss", %{key: key} do
+      assert {:ok, _} = put(key, "old", ttl: 1)
+      Process.sleep(1100)
+
+      assert {:ok, "new"} =
+               Cache.get_or_put(Emulator.project(), Emulator.instance(), @table, key, fn ->
+                 "new"
+               end)
+
+      assert get(key) == {:ok, "new"}
+    end
+  end
+
+  describe "put_many/5 and get_many/5" do
+    test "returns every requested key, nil for missing and expired", %{key: key} do
+      present = key <> ":present"
+      expired = key <> ":expired"
+      missing = key <> ":missing"
+
+      assert {:ok, _} =
+               Cache.put_many(Emulator.project(), Emulator.instance(), @table, [
+                 {present, %{ok: true}}
+               ])
+
+      assert {:ok, _} = put(expired, "soon gone", ttl: 1)
+      Process.sleep(1100)
+
+      assert {:ok, results} =
+               Cache.get_many(Emulator.project(), Emulator.instance(), @table, [
+                 present,
+                 expired,
+                 missing
+               ])
+
+      assert results == %{present => %{ok: true}, expired => nil, missing => nil}
+    end
+
+    test "put_many applies :ttl to every entry", %{key: key} do
+      a = key <> ":a"
+      b = key <> ":b"
+
+      assert {:ok, _} =
+               Cache.put_many(Emulator.project(), Emulator.instance(), @table, [{a, 1}, {b, 2}],
+                 ttl: 2
+               )
+
+      assert {:ok, %{^a => 1, ^b => 2}} =
+               Cache.get_many(Emulator.project(), Emulator.instance(), @table, [a, b])
+
+      Process.sleep(2100)
+
+      assert {:ok, %{^a => nil, ^b => nil}} =
+               Cache.get_many(Emulator.project(), Emulator.instance(), @table, [a, b])
+    end
+  end
+
+  describe "delete/5 and delete_many/5" do
+    test "delete removes the entry", %{key: key} do
+      assert {:ok, _} = put(key, "bye")
+      assert {:ok, _} = Cache.delete(Emulator.project(), Emulator.instance(), @table, key)
+      assert get(key) == {:ok, nil}
+      assert exists?(key) == {:ok, false}
+    end
+
+    test "delete_many removes every listed key", %{key: key} do
+      keys = [key <> ":1", key <> ":2"]
+      Enum.each(keys, &put(&1, "bye"))
+
+      assert {:ok, results} =
+               Cache.delete_many(Emulator.project(), Emulator.instance(), @table, keys)
+
+      assert Enum.all?(results, &(&1.status.code == 0))
+
+      assert {:ok, gone} = Cache.get_many(Emulator.project(), Emulator.instance(), @table, keys)
+      assert Enum.all?(gone, fn {_k, v} -> is_nil(v) end)
+    end
+  end
+
+  describe "errors" do
+    test "a request failure surfaces from get and exists? instead of reading as a miss",
+         %{key: key} do
+      assert {:error, _} =
+               Cache.get(Emulator.project(), Emulator.instance(), "no_such_table", key)
+
+      assert {:error, _} =
+               Cache.exists?(Emulator.project(), Emulator.instance(), "no_such_table", key)
     end
   end
 end

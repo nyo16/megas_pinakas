@@ -3,7 +3,11 @@ defmodule MegasPinakas.Batch do
   Batch builder for multi-row mutations.
 
   Provides a fluent API for building batch operations that affect multiple rows,
-  which can then be executed with a single `mutate_rows` call.
+  which can then be executed with `write/5`.
+
+  BigTable caps a `MutateRows` request at 100,000 mutations and 256 MiB.
+  `write/5` transparently splits larger batches by mutation count; see its docs
+  for how results and failures are reported across chunks.
 
   ## Examples
 
@@ -120,6 +124,8 @@ defmodule MegasPinakas.Batch do
   # Execution
   # ============================================================================
 
+  @max_mutations_per_request 100_000
+
   @doc """
   Executes the batch mutation against BigTable.
 
@@ -132,6 +138,17 @@ defmodule MegasPinakas.Batch do
       {:ok, results} = batch |> MegasPinakas.Batch.write(project, instance, "users")
       failed = Enum.reject(results, &(&1.status.code == 0))
 
+  ## Request limits
+
+  A single `MutateRows` request may carry at most 100,000 mutations and 256 MiB
+  of data. Batches over the mutation cap are split into consecutive requests,
+  each sent in turn; the results are concatenated and each result's `index` is
+  re-based so it still refers to the entry's position in the batch. The first
+  request to fail stops the sequence and its error is returned — entries in
+  earlier chunks have already been applied, later chunks were not sent. The
+  byte cap is not enforced client-side; a single row's mutations exceeding it is
+  rejected by the server. An empty batch makes no request and returns `{:ok, []}`.
+
   ## Examples
 
       {:ok, results} = batch |> MegasPinakas.Batch.write(project, instance, "users")
@@ -143,9 +160,51 @@ defmodule MegasPinakas.Batch do
   """
   @spec write(t(), String.t(), String.t(), String.t(), keyword()) ::
           {:ok, [Google.Bigtable.V2.MutateRowsResponse.Entry.t()]} | {:error, term()}
-  def write(%__MODULE__{entries: entries}, project, instance, table, opts \\ []) do
-    # Reverse to maintain insertion order
-    MegasPinakas.mutate_rows(project, instance, table, Enum.reverse(entries), opts)
+  def write(%__MODULE__{} = batch, project, instance, table, opts \\ []) do
+    batch
+    |> to_entries()
+    |> chunk_entries(@max_mutations_per_request)
+    |> Enum.reduce_while({:ok, [], 0}, fn chunk, {:ok, acc, offset} ->
+      case MegasPinakas.mutate_rows(project, instance, table, chunk, opts) do
+        {:ok, results} ->
+          rebased = Enum.map(results, &%{&1 | index: &1.index + offset})
+          {:cont, {:ok, [rebased | acc], offset + length(chunk)}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, chunks, _offset} -> {:ok, chunks |> Enum.reverse() |> Enum.concat()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  # Splits entries (insertion order) into consecutive runs whose total mutation
+  # count stays within `limit`. Entry order is preserved so `write/5` can
+  # re-base result indexes by chunk offset. A single entry larger than `limit`
+  # gets its own chunk; the server rejects it with a clear error, whereas
+  # splitting one row's mutations across requests would break atomicity.
+  @spec chunk_entries([entry()], pos_integer()) :: [[entry()]]
+  def chunk_entries(entries, limit) when is_list(entries) and is_integer(limit) and limit > 0 do
+    entries
+    |> Enum.chunk_while(
+      {[], 0},
+      fn entry, {chunk, count} ->
+        size = length(entry.mutations)
+
+        if chunk != [] and count + size > limit do
+          {:cont, Enum.reverse(chunk), {[entry], size}}
+        else
+          {:cont, {[entry | chunk], count + size}}
+        end
+      end,
+      fn
+        {[], _} -> {:cont, []}
+        {chunk, _} -> {:cont, Enum.reverse(chunk), []}
+      end
+    )
   end
 
   # ============================================================================

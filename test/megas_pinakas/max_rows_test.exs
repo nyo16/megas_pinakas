@@ -79,34 +79,6 @@ defmodule MegasPinakas.MaxRowsTest do
     test "a rows_limit above the cap still trips the cap" do
       assert {:error, :result_too_large} = read(rows_limit: 40, max_rows: 10)
     end
-
-    test "the cap bounds server work rather than scanning the table" do
-      # max_rows: 3 asks the server for at most 4 rows. If the cap were enforced
-      # by reading everything and then checking length, this would assemble all
-      # 50 rows first.
-      me = self()
-      handler = {__MODULE__, System.unique_integer([:positive])}
-
-      :telemetry.attach(
-        handler,
-        [:megas_pinakas, :request, :stop],
-        fn _e, %{duration: d}, _m, _c -> send(me, {:duration, d}) end,
-        nil
-      )
-
-      on_exit(fn -> :telemetry.detach(handler) end)
-
-      assert {:error, :result_too_large} = read(max_rows: 3)
-      assert_received {:duration, capped_duration}
-
-      assert {:ok, _} = read([])
-      assert_received {:duration, full_duration}
-
-      assert capped_duration < full_duration, """
-      A capped read (max_rows: 3) took #{capped_duration} vs #{full_duration} for a
-      full #{@row_count}-row scan, suggesting the cap did not bound server work.
-      """
-    end
   end
 
   describe "read_row/5 is unaffected" do

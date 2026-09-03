@@ -6,6 +6,7 @@ defmodule MegasPinakas.StreamTelemetryTest do
   A lazily-consumed stream has no single duration a request span could
   represent — the consumer sets the pace and may abandon it — so streams get
   their own event pair, plus a distinct `:cancelled` for early termination.
+  Every event of one stream shares a `:stream_ref` in its metadata.
   """
 
   use ExUnit.Case, async: false
@@ -34,6 +35,8 @@ defmodule MegasPinakas.StreamTelemetryTest do
         [:megas_pinakas, :stream, :start],
         [:megas_pinakas, :stream, :stop],
         [:megas_pinakas, :stream, :cancelled],
+        [:megas_pinakas, :stream, :exception],
+        [:megas_pinakas, :stream, :retry],
         [:megas_pinakas, :request, :start]
       ],
       fn [_, kind, event], measurements, metadata, _config ->
@@ -68,7 +71,7 @@ defmodule MegasPinakas.StreamTelemetryTest do
       assert stream_events() == []
     end
 
-    test "carries the table and batch size" do
+    test "carries the table, batch size and a stream_ref" do
       Streaming.stream_rows(Emulator.project(), Emulator.instance(), @table, batch_size: 7)
       |> Enum.to_list()
 
@@ -78,6 +81,19 @@ defmodule MegasPinakas.StreamTelemetryTest do
       assert metadata.project == Emulator.project()
       assert metadata.instance == Emulator.instance()
       assert metadata.batch_size == 7
+      assert is_reference(metadata.stream_ref)
+    end
+
+    test "every event of one stream shares the same stream_ref" do
+      Streaming.stream_rows(Emulator.project(), Emulator.instance(), @table) |> Enum.to_list()
+      Streaming.stream_rows(Emulator.project(), Emulator.instance(), @table) |> Enum.take(1)
+
+      refs =
+        stream_events()
+        |> Enum.map(fn {_, event, _, metadata} -> {event, metadata.stream_ref} end)
+
+      assert [{:start, ref_a}, {:stop, ref_a}, {:start, ref_b}, {:cancelled, ref_b}] = refs
+      assert ref_a != ref_b
     end
   end
 
@@ -200,32 +216,42 @@ defmodule MegasPinakas.StreamTelemetryTest do
       assert length(rows) == @row_count
     end
 
-    test "a limited stream stops issuing requests once satisfied" do
+    test "a limited stream issues exactly the requests its rows need" do
       Streaming.stream_rows(Emulator.project(), Emulator.instance(), @table,
         rows_limit: 4,
         batch_size: 2
       )
       |> Enum.to_list()
 
-      # 4 rows at 2 per batch is 2 requests; allow one extra for the terminating
-      # probe, but not a full-table scan.
-      assert request_count() <= 3
+      # 4 rows at 2 per batch is 2 requests. Once the limit is met the stream
+      # halts without a terminating probe.
+      assert request_count() == 2
     end
   end
 
   describe ":batch_size" do
-    test "defaults to 10_000, so a small table needs one request" do
+    test "defaults to 10_000, so a small table needs exactly one request" do
       Streaming.stream_rows(Emulator.project(), Emulator.instance(), @table) |> Enum.to_list()
 
-      # One request returns all 25 rows; a second confirms exhaustion.
-      assert request_count() <= 2
+      # The single batch returns 25 < 10_000 rows, which proves exhaustion; no
+      # second request is needed to confirm it.
+      assert request_count() == 1
     end
 
-    test "a smaller batch size costs more requests for the same rows" do
+    test "a short final batch ends the stream without a probe request" do
+      Streaming.stream_rows(Emulator.project(), Emulator.instance(), @table, batch_size: 10)
+      |> Enum.to_list()
+
+      # 10 + 10 + 5: the third batch is short, so it is the last request.
+      assert request_count() == 3
+    end
+
+    test "a table size that is a multiple of batch_size costs one probe request" do
       Streaming.stream_rows(Emulator.project(), Emulator.instance(), @table, batch_size: 5)
       |> Enum.to_list()
 
-      assert request_count() >= 5
+      # Five full batches cannot prove exhaustion; a sixth, empty one does.
+      assert request_count() == 6
     end
 
     test "batch size does not change the rows returned" do

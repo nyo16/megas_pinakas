@@ -68,61 +68,6 @@ defmodule MegasPinakas.CounterTest do
     end
   end
 
-  describe "module structure" do
-    test "exports increment function" do
-      functions = Counter.__info__(:functions)
-      assert {:increment, 7} in functions
-      assert {:increment, 8} in functions
-    end
-
-    test "exports decrement function" do
-      functions = Counter.__info__(:functions)
-      assert {:decrement, 7} in functions
-      assert {:decrement, 8} in functions
-    end
-
-    test "exports get function" do
-      functions = Counter.__info__(:functions)
-      assert {:get, 6} in functions
-      assert {:get, 7} in functions
-    end
-
-    test "exports set function" do
-      functions = Counter.__info__(:functions)
-      assert {:set, 7} in functions
-      assert {:set, 8} in functions
-    end
-
-    test "exports reset function" do
-      functions = Counter.__info__(:functions)
-      assert {:reset, 6} in functions
-      assert {:reset, 7} in functions
-    end
-
-    test "exports increment_many function" do
-      functions = Counter.__info__(:functions)
-      assert {:increment_many, 5} in functions
-      assert {:increment_many, 6} in functions
-    end
-
-    test "exports increment_if_exists function" do
-      functions = Counter.__info__(:functions)
-      assert {:increment_if_exists, 7} in functions
-      assert {:increment_if_exists, 8} in functions
-    end
-
-    test "exports add_counter function" do
-      functions = Counter.__info__(:functions)
-      assert {:add_counter, 3} in functions
-      assert {:add_counter, 4} in functions
-    end
-
-    test "exports increment_rule function" do
-      functions = Counter.__info__(:functions)
-      assert {:increment_rule, 3} in functions
-    end
-  end
-
   # Shared by Counter and CounterTTL, which both decode a counter out of a
   # read-modify-write response. Previously duplicated verbatim in both modules.
   describe "extract_counter_value/3" do
@@ -176,5 +121,180 @@ defmodule MegasPinakas.CounterTest do
         ]
       }
     }
+  end
+end
+
+defmodule MegasPinakas.CounterEmulatorTest do
+  @moduledoc """
+  Emulator-backed contract tests for `MegasPinakas.Counter`: atomic increments
+  roundtrip, reads see only the latest version, and `increment_if_exists/8`
+  is a real compare-and-swap that never creates a counter.
+  """
+
+  use ExUnit.Case, async: false
+
+  alias MegasPinakas.Counter
+  alias MegasPinakas.Test.Emulator
+
+  @moduletag :emulator
+
+  @table "highlevel_counter_test"
+  @family "cf"
+  @qualifier "n"
+
+  setup_all do
+    Emulator.setup_table(@table, [@family])
+    :ok
+  end
+
+  setup %{test: test} do
+    {:ok, row: "counter:#{test}"}
+  end
+
+  defp increment(row, amount),
+    do:
+      Counter.increment(
+        Emulator.project(),
+        Emulator.instance(),
+        @table,
+        row,
+        @family,
+        @qualifier,
+        amount
+      )
+
+  defp get(row),
+    do: Counter.get(Emulator.project(), Emulator.instance(), @table, row, @family, @qualifier)
+
+  defp increment_if_exists(row, amount),
+    do:
+      Counter.increment_if_exists(
+        Emulator.project(),
+        Emulator.instance(),
+        @table,
+        row,
+        @family,
+        @qualifier,
+        amount
+      )
+
+  describe "increment/8 and get/7" do
+    test "a missing counter reads as nil", %{row: row} do
+      assert get(row) == {:ok, nil}
+    end
+
+    test "increment creates the counter and returns the running total", %{row: row} do
+      assert increment(row, 1) == {:ok, 1}
+      assert increment(row, 5) == {:ok, 6}
+      assert get(row) == {:ok, 6}
+    end
+
+    test "negative increments and decrement/8 subtract", %{row: row} do
+      assert increment(row, 10) == {:ok, 10}
+      assert increment(row, -3) == {:ok, 7}
+
+      assert Counter.decrement(
+               Emulator.project(),
+               Emulator.instance(),
+               @table,
+               row,
+               @family,
+               @qualifier,
+               7
+             ) == {:ok, 0}
+
+      assert get(row) == {:ok, 0}
+    end
+
+    test "get returns the latest value after many read-modify-writes", %{row: row} do
+      for _ <- 1..5, do: {:ok, _} = increment(row, 1)
+      assert get(row) == {:ok, 5}
+    end
+
+    test "set/8 and reset/7 overwrite", %{row: row} do
+      assert {:ok, _} =
+               Counter.set(
+                 Emulator.project(),
+                 Emulator.instance(),
+                 @table,
+                 row,
+                 @family,
+                 @qualifier,
+                 100
+               )
+
+      assert get(row) == {:ok, 100}
+
+      assert {:ok, _} =
+               Counter.reset(
+                 Emulator.project(),
+                 Emulator.instance(),
+                 @table,
+                 row,
+                 @family,
+                 @qualifier
+               )
+
+      assert get(row) == {:ok, 0}
+    end
+  end
+
+  describe "increment_many/6" do
+    test "increments several columns of one row atomically", %{row: row} do
+      assert {:ok, %{"cf:a" => 1, "cf:b" => 3}} =
+               Counter.increment_many(Emulator.project(), Emulator.instance(), @table, row, [
+                 {@family, "a", 1},
+                 {@family, "b", 3}
+               ])
+
+      assert {:ok, %{"cf:a" => 2, "cf:b" => 6}} =
+               Counter.increment_many(Emulator.project(), Emulator.instance(), @table, row, [
+                 {@family, "a", 1},
+                 {@family, "b", 3}
+               ])
+    end
+  end
+
+  describe "increment_if_exists/8" do
+    test "does not create a missing counter", %{row: row} do
+      assert increment_if_exists(row, 1) == {:ok, :not_applied}
+      assert get(row) == {:ok, nil}
+    end
+
+    test "adds to an existing counter: 41 + 1 -> 42", %{row: row} do
+      assert increment(row, 41) == {:ok, 41}
+      assert increment_if_exists(row, 1) == {:ok, :applied}
+      assert get(row) == {:ok, 42}
+    end
+
+    test "applies negative amounts", %{row: row} do
+      assert increment(row, 10) == {:ok, 10}
+      assert increment_if_exists(row, -4) == {:ok, :applied}
+      assert get(row) == {:ok, 6}
+    end
+
+    test "adds to the latest value when older cell versions are present", %{row: row} do
+      # Several RMWs leave older cell versions behind until GC runs; the CAS
+      # must read and add to the newest (3), not to a stale version.
+      for _ <- 1..3, do: {:ok, _} = increment(row, 1)
+      assert increment_if_exists(row, 10) == {:ok, :applied}
+      assert get(row) == {:ok, 13}
+    end
+
+    test "a counter in another column does not count as existing", %{row: row} do
+      assert {:ok, 1} =
+               Counter.increment(
+                 Emulator.project(),
+                 Emulator.instance(),
+                 @table,
+                 row,
+                 @family,
+                 "other",
+                 1
+               )
+
+      assert increment_if_exists(row, 1) == {:ok, :not_applied}
+      assert get(row) == {:ok, nil}
+    end
   end
 end

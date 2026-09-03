@@ -1,5 +1,5 @@
 defmodule MegasPinakas.Filter do
-  @moduledoc """
+  @moduledoc ~S"""
   BigTable filter builders for read operations.
 
   Filters reduce data returned from reads, improving performance.
@@ -7,6 +7,22 @@ defmodule MegasPinakas.Filter do
   - **Limiting filters**: Control which rows/cells are included
   - **Modifying filters**: Transform cell data/metadata
   - **Composing filters**: Combine multiple filters (AND/OR/conditional)
+
+  ## Regex semantics
+
+  Every `*_regex_filter` is an [RE2](https://github.com/google/re2/wiki/Syntax)
+  pattern that BigTable matches against the **whole** byte string — row key,
+  qualifier, family name, or value. There is no implicit `.*` on either side, so
+  `row_key_regex_filter("user#")` matches only the row whose key is exactly
+  `user#`. `^` and `$` are accepted but redundant.
+
+  To match a prefix, suffix, or substring, pad the pattern with `\C*`, the RE2
+  byte wildcard (`.` does not match `\n` and, in UTF-8 mode, refuses arbitrary
+  bytes). `row_key_prefix_filter/1` does this for you:
+
+      MegasPinakas.Filter.row_key_regex_filter("user#\\C*")   # prefix
+      MegasPinakas.Filter.row_key_regex_filter("\\C*_count")  # suffix
+      MegasPinakas.Filter.row_key_regex_filter("\\C*admin\\C*") # substring
 
   ## Examples
 
@@ -25,7 +41,7 @@ defmodule MegasPinakas.Filter do
       # Complex filter: family "cf", column "name", only latest version
       filter = MegasPinakas.Filter.chain_filters([
         MegasPinakas.Filter.family_filter("cf"),
-        MegasPinakas.Filter.column_qualifier_regex_filter("^name$"),
+        MegasPinakas.Filter.column_qualifier_regex_filter("name"),
         MegasPinakas.Filter.cells_per_column_limit_filter(1)
       ])
   """
@@ -36,18 +52,19 @@ defmodule MegasPinakas.Filter do
   # Limiting Filters - Row Level
   # ============================================================================
 
-  @doc """
+  @doc ~S"""
   Creates a filter that matches row keys by regex pattern.
 
-  Uses RE2 regex syntax.
+  Uses RE2 regex syntax and matches the whole key; see "Regex semantics" in the
+  module docs.
 
   ## Examples
 
       # Match row keys starting with "user#"
-      MegasPinakas.Filter.row_key_regex_filter("^user#")
+      MegasPinakas.Filter.row_key_regex_filter("user#\\C*")
 
       # Match row keys containing "admin"
-      MegasPinakas.Filter.row_key_regex_filter("admin")
+      MegasPinakas.Filter.row_key_regex_filter("\\C*admin\\C*")
   """
   @spec row_key_regex_filter(String.t()) :: RowFilter.t()
   def row_key_regex_filter(regex) when is_binary(regex) do
@@ -57,7 +74,9 @@ defmodule MegasPinakas.Filter do
   @doc """
   Creates a filter that randomly samples rows.
 
-  Probability should be between 0.0 and 1.0.
+  Probability must be strictly between 0 and 1: BigTable rejects `0` and `1`
+  with `INVALID_ARGUMENT`. Use `block_all_filter/0` or `pass_all_filter/0` for
+  the degenerate cases.
 
   ## Examples
 
@@ -67,10 +86,10 @@ defmodule MegasPinakas.Filter do
       # Sample approximately 50% of rows
       MegasPinakas.Filter.row_sample_filter(0.5)
   """
-  @spec row_sample_filter(float()) :: RowFilter.t()
+  @spec row_sample_filter(number()) :: RowFilter.t()
   def row_sample_filter(probability)
-      when is_float(probability) and probability >= 0.0 and probability <= 1.0 do
-    %RowFilter{filter: {:row_sample_filter, probability}}
+      when is_number(probability) and probability > 0 and probability < 1 do
+    %RowFilter{filter: {:row_sample_filter, probability / 1}}
   end
 
   # ============================================================================
@@ -119,18 +138,19 @@ defmodule MegasPinakas.Filter do
     %RowFilter{filter: {:cells_per_column_limit_filter, limit}}
   end
 
-  @doc """
+  @doc ~S"""
   Creates a filter that matches column qualifiers by regex.
 
-  Uses RE2 regex syntax.
+  Uses RE2 regex syntax and matches the whole qualifier; see "Regex semantics"
+  in the module docs.
 
   ## Examples
 
       # Match columns starting with "meta_"
-      MegasPinakas.Filter.column_qualifier_regex_filter("^meta_")
+      MegasPinakas.Filter.column_qualifier_regex_filter("meta_\\C*")
 
       # Match columns ending with "_count"
-      MegasPinakas.Filter.column_qualifier_regex_filter("_count$")
+      MegasPinakas.Filter.column_qualifier_regex_filter("\\C*_count")
   """
   @spec column_qualifier_regex_filter(String.t()) :: RowFilter.t()
   def column_qualifier_regex_filter(regex) when is_binary(regex) do
@@ -143,6 +163,9 @@ defmodule MegasPinakas.Filter do
 
   @doc """
   Creates a filter for a range of column qualifiers.
+
+  Give at most one start bound and at most one end bound; passing both the
+  `_closed` and `_open` variant for the same side raises `ArgumentError`.
 
   ## Options
 
@@ -166,31 +189,11 @@ defmodule MegasPinakas.Filter do
   """
   @spec column_range_filter(String.t(), keyword()) :: RowFilter.t()
   def column_range_filter(family, opts \\ []) when is_binary(family) do
-    range = %ColumnRange{family_name: family}
-
-    range =
-      case Keyword.get(opts, :start_qualifier_closed) do
-        nil -> range
-        value -> %{range | start_qualifier: {:start_qualifier_closed, value}}
-      end
-
-    range =
-      case Keyword.get(opts, :start_qualifier_open) do
-        nil -> range
-        value -> %{range | start_qualifier: {:start_qualifier_open, value}}
-      end
-
-    range =
-      case Keyword.get(opts, :end_qualifier_closed) do
-        nil -> range
-        value -> %{range | end_qualifier: {:end_qualifier_closed, value}}
-      end
-
-    range =
-      case Keyword.get(opts, :end_qualifier_open) do
-        nil -> range
-        value -> %{range | end_qualifier: {:end_qualifier_open, value}}
-      end
+    range = %ColumnRange{
+      family_name: family,
+      start_qualifier: range_bound(opts, :start_qualifier_closed, :start_qualifier_open),
+      end_qualifier: range_bound(opts, :end_qualifier_closed, :end_qualifier_open)
+    }
 
     %RowFilter{filter: {:column_range_filter, range}}
   end
@@ -198,7 +201,10 @@ defmodule MegasPinakas.Filter do
   @doc """
   Creates a filter for a timestamp range.
 
-  Timestamps are in microseconds since Unix epoch.
+  Timestamps are microseconds since the Unix epoch. The start is inclusive, the
+  end is exclusive, and `0` on either side means "unbounded" — so
+  `timestamp_range_filter(0, t)` is "strictly before `t`" and
+  `timestamp_range_filter(t, 0)` is "at or after `t`".
 
   ## Examples
 
@@ -212,9 +218,10 @@ defmodule MegasPinakas.Filter do
       end_micros = DateTime.to_unix(~U[2024-02-01 00:00:00Z], :microsecond)
       MegasPinakas.Filter.timestamp_range_filter(start_micros, end_micros)
   """
-  @spec timestamp_range_filter(integer(), integer()) :: RowFilter.t()
+  @spec timestamp_range_filter(non_neg_integer(), non_neg_integer()) :: RowFilter.t()
   def timestamp_range_filter(start_timestamp_micros, end_timestamp_micros)
-      when is_integer(start_timestamp_micros) and is_integer(end_timestamp_micros) do
+      when is_integer(start_timestamp_micros) and start_timestamp_micros >= 0 and
+             is_integer(end_timestamp_micros) and end_timestamp_micros >= 0 do
     range = %TimestampRange{
       start_timestamp_micros: start_timestamp_micros,
       end_timestamp_micros: end_timestamp_micros
@@ -225,6 +232,9 @@ defmodule MegasPinakas.Filter do
 
   @doc """
   Creates a filter for a value range.
+
+  Give at most one start bound and at most one end bound; passing both the
+  `_closed` and `_open` variant for the same side raises `ArgumentError`.
 
   ## Options
 
@@ -249,47 +259,46 @@ defmodule MegasPinakas.Filter do
   """
   @spec value_range_filter(keyword()) :: RowFilter.t()
   def value_range_filter(opts \\ []) do
-    range = %ValueRange{}
-
-    range =
-      case Keyword.get(opts, :start_value_closed) do
-        nil -> range
-        value -> %{range | start_value: {:start_value_closed, value}}
-      end
-
-    range =
-      case Keyword.get(opts, :start_value_open) do
-        nil -> range
-        value -> %{range | start_value: {:start_value_open, value}}
-      end
-
-    range =
-      case Keyword.get(opts, :end_value_closed) do
-        nil -> range
-        value -> %{range | end_value: {:end_value_closed, value}}
-      end
-
-    range =
-      case Keyword.get(opts, :end_value_open) do
-        nil -> range
-        value -> %{range | end_value: {:end_value_open, value}}
-      end
+    range = %ValueRange{
+      start_value: range_bound(opts, :start_value_closed, :start_value_open),
+      end_value: range_bound(opts, :end_value_closed, :end_value_open)
+    }
 
     %RowFilter{filter: {:value_range_filter, range}}
   end
 
-  @doc """
+  # Resolves one side of a range to its proto oneof tuple. Passing both the
+  # `_closed` and `_open` bound for one side is a caller error.
+  defp range_bound(opts, closed_key, open_key) do
+    case {Keyword.get(opts, closed_key), Keyword.get(opts, open_key)} do
+      {nil, nil} ->
+        nil
+
+      {closed, nil} ->
+        {closed_key, closed}
+
+      {nil, open} ->
+        {open_key, open}
+
+      _ ->
+        raise ArgumentError,
+              "#{inspect(closed_key)} and #{inspect(open_key)} are mutually exclusive, got both"
+    end
+  end
+
+  @doc ~S"""
   Creates a filter that matches cell values by regex.
 
-  Uses RE2 regex syntax.
+  Uses RE2 regex syntax and matches the whole value; see "Regex semantics" in
+  the module docs.
 
   ## Examples
 
       # Match values containing "error"
-      MegasPinakas.Filter.value_regex_filter("error")
+      MegasPinakas.Filter.value_regex_filter("\\C*error\\C*")
 
       # Match values that are valid UUIDs
-      MegasPinakas.Filter.value_regex_filter("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+      MegasPinakas.Filter.value_regex_filter("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")
   """
   @spec value_regex_filter(String.t()) :: RowFilter.t()
   def value_regex_filter(regex) when is_binary(regex) do
@@ -315,15 +324,16 @@ defmodule MegasPinakas.Filter do
     %RowFilter{filter: {:family_name_regex_filter, "^#{Regex.escape(family_name)}$"}}
   end
 
-  @doc """
+  @doc ~S"""
   Creates a filter that matches a column family by regex.
 
-  Uses RE2 regex syntax.
+  Uses RE2 regex syntax and matches the whole family name; see "Regex
+  semantics" in the module docs.
 
   ## Examples
 
       # Match families starting with "cf_"
-      MegasPinakas.Filter.family_regex_filter("^cf_")
+      MegasPinakas.Filter.family_regex_filter("cf_\\C*")
   """
   @spec family_regex_filter(String.t()) :: RowFilter.t()
   def family_regex_filter(regex) when is_binary(regex) do
@@ -426,7 +436,7 @@ defmodule MegasPinakas.Filter do
       # Family "cf", column "name", only latest version
       MegasPinakas.Filter.chain_filters([
         MegasPinakas.Filter.family_filter("cf"),
-        MegasPinakas.Filter.column_qualifier_regex_filter("^name$"),
+        MegasPinakas.Filter.column_qualifier_regex_filter("name"),
         MegasPinakas.Filter.cells_per_column_limit_filter(1)
       ])
   """
@@ -454,7 +464,7 @@ defmodule MegasPinakas.Filter do
     %RowFilter{filter: {:interleave, %RowFilter.Interleave{filters: filters}}}
   end
 
-  @doc """
+  @doc ~S"""
   Creates a conditional filter (if-then-else logic).
 
   If the predicate filter matches any cells in the row, the true_filter
@@ -473,7 +483,7 @@ defmodule MegasPinakas.Filter do
 
       # Label cells based on value
       MegasPinakas.Filter.condition_filter(
-        MegasPinakas.Filter.value_regex_filter("error"),
+        MegasPinakas.Filter.value_regex_filter("\\C*error\\C*"),
         MegasPinakas.Filter.apply_label_filter("has_error"),
         MegasPinakas.Filter.pass_all_filter()
       )
@@ -568,15 +578,21 @@ defmodule MegasPinakas.Filter do
     timestamp_range_filter(start_time, now)
   end
 
-  @doc """
-  Creates a filter for rows matching a key prefix.
+  @doc ~S"""
+  Creates a filter for rows whose key starts with `prefix`.
+
+  Builds `row_key_regex_filter(Regex.escape(prefix) <> "\\C*")`. The `\C*`
+  tail is what makes this a prefix match: BigTable regexes must match the
+  whole key, so a bare escaped prefix would only match the row keyed exactly
+  `prefix`.
 
   ## Examples
 
       MegasPinakas.Filter.row_key_prefix_filter("user#")
+      # => matches "user#", "user#1", "user#2", not "admin#1"
   """
   @spec row_key_prefix_filter(String.t()) :: RowFilter.t()
   def row_key_prefix_filter(prefix) when is_binary(prefix) do
-    row_key_regex_filter("^#{Regex.escape(prefix)}")
+    row_key_regex_filter(Regex.escape(prefix) <> "\\C*")
   end
 end

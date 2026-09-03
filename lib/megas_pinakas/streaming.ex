@@ -31,12 +31,23 @@ defmodule MegasPinakas.Streaming do
       |> Stream.chunk_every(100)
       |> Stream.each(fn chunk -> process_batch(chunk) end)
       |> Stream.run()
+
+  ## Failure
+
+  A mid-stream failure raises `MegasPinakas.StreamError`. A lazy stream has no
+  return value to carry an error tuple, and halting quietly would make
+  `Enum.to_list/1` return partial data indistinguishable from a complete result.
+  Transient gRPC statuses (`:unavailable`, `:deadline_exceeded`, `:aborted`) are
+  retried per batch before raising; see the `:max_retries` option of
+  `stream_rows/4`.
   """
 
   require Logger
 
   alias Google.Bigtable.V2.RowSet
   alias MegasPinakas
+  alias MegasPinakas.Filter
+  alias MegasPinakas.StreamError
 
   # ============================================================================
   # Row Streaming
@@ -53,15 +64,25 @@ defmodule MegasPinakas.Streaming do
   # does not reap it either. Draining every batch is structurally leak-free and
   # needs no gRPC internals.
   #
-  # The cost is round trips, so the default batch is large. Scanning 20 000 rows:
+  # The cost is round trips, so the default batch is large. A batch that comes
+  # back short of the limit requested proves the row set is exhausted, so no
+  # trailing empty probe is issued: scanning N rows costs exactly
+  # ceil(N / batch_size) RPCs when N is not a multiple of batch_size, and one
+  # more when it is. Scanning 20 000 rows (a multiple of every size below, so
+  # each count includes the probe):
   #
   #     single RPC (eager read_rows)    56.4 ms    1 RPC
-  #     batch_size 10_000               61.1 ms    2 RPCs   <- default
-  #     batch_size  1_000              171.8 ms   20 RPCs   <- previous default
-  #     batch_size    100              896.5 ms  200 RPCs
+  #     batch_size 10_000               61.1 ms    3 RPCs   <- default
+  #     batch_size  1_000              171.8 ms   21 RPCs   <- previous default
+  #     batch_size    100              896.5 ms  201 RPCs
   #
   # 10_000 lands within 8% of the single-RPC ideal.
   @default_batch_size 10_000
+
+  @default_max_retries 3
+  @retryable_statuses [:unavailable, :deadline_exceeded, :aborted]
+  @backoff_base_ms 100
+  @backoff_cap_ms 2_000
 
   @doc """
   Creates a Stream that yields rows from BigTable.
@@ -71,11 +92,23 @@ defmodule MegasPinakas.Streaming do
 
   ## Options
 
-    * `:rows` - RowSet specifying which rows to read
+    * `:rows` - `%Google.Bigtable.V2.RowSet{}` specifying which rows to read
+      (see `MegasPinakas.row_set/1` and `MegasPinakas.row_set_from_ranges/1`);
+      `nil` reads the whole table
     * `:filter` - RowFilter to apply
-    * `:batch_size` - Rows to fetch per round trip (default: #{@default_batch_size})
-    * `:rows_limit` - Maximum number of rows the stream will ever yield
+    * `:batch_size` - Rows to fetch per round trip, a positive integer
+      (default: #{@default_batch_size})
+    * `:rows_limit` - Maximum number of rows the stream will ever yield, a
+      non-negative integer. `0` and `nil` both mean unlimited, matching the
+      ReadRows proto
+    * `:max_retries` - How many times a batch whose RPC fails with a transient
+      status (`:unavailable`, `:deadline_exceeded`, `:aborted`) is re-issued
+      before the stream raises (default: #{@default_max_retries}). Retries back
+      off exponentially from #{@backoff_base_ms} ms, capped at #{@backoff_cap_ms} ms
     * `:app_profile_id` - App profile to use
+
+  Invalid `:rows`, `:batch_size`, `:rows_limit` or `:max_retries` raise
+  `ArgumentError` when the stream is built, before any request is issued.
 
   ## Choosing a batch size
 
@@ -89,7 +122,26 @@ defmodule MegasPinakas.Streaming do
   Emits `[:megas_pinakas, :stream, :start]` on first demand, then exactly one of:
 
     * `[:megas_pinakas, :stream, :stop]` — the stream ran to exhaustion
-    * `[:megas_pinakas, :stream, :cancelled]` — the consumer stopped early
+    * `[:megas_pinakas, :stream, :cancelled]` — the consumer stopped early, or
+      the stream failed (see below)
+
+  Every event's metadata carries `:project`, `:instance`, `:table`, `:batch_size`
+  and a `:stream_ref` — a reference unique to this stream, so the events of one
+  stream can be joined.
+
+  Two further events describe failures:
+
+    * `[:megas_pinakas, :stream, :retry]` — a batch failed with a transient
+      status and is about to be re-issued. Measurements: `%{attempt: n}` (1 for
+      the first retry). Metadata adds `:reason`
+    * `[:megas_pinakas, :stream, :exception]` — a batch failed permanently and
+      the stream is about to raise `MegasPinakas.StreamError`. Measurements match
+      `:stop` (`duration`, `rows_emitted`, `batches`); metadata adds `:reason`.
+      Because `Stream.resource/3` runs its cleanup with the state from before the
+      failing call, the `:exception` event is always **followed by a
+      `:cancelled` event** for the same `:stream_ref`. Treat `:cancelled` as
+      "did not run to exhaustion" and join on `:stream_ref` to tell abandonment
+      from failure
 
   These are distinct from the per-batch `[:megas_pinakas, :request, :*]` spans; a
   lazily-consumed stream has no single duration a request span could represent.
@@ -116,20 +168,35 @@ defmodule MegasPinakas.Streaming do
   @spec stream_rows(String.t(), String.t(), String.t(), keyword()) :: Enumerable.t()
   def stream_rows(project, instance, table, opts \\ []) do
     batch_size = Keyword.get(opts, :batch_size, @default_batch_size)
+    max_retries = Keyword.get(opts, :max_retries, @default_max_retries)
+    remaining = normalize_rows_limit(Keyword.get(opts, :rows_limit))
+    # Undocumented seam for tests: lets the retry path be driven by a fake
+    # fetcher without a network. Same signature as `MegasPinakas.read_rows/4`.
+    read_fun = Keyword.get(opts, :read_fun, &MegasPinakas.read_rows/4)
 
-    # A `:rows_limit` of 0 means "no limit" in the ReadRows proto; normalize it so
-    # it cannot be confused with "yield nothing".
-    remaining =
-      case Keyword.get(opts, :rows_limit) do
-        nil -> :infinity
-        0 -> :infinity
-        limit when is_integer(limit) and limit > 0 -> limit
-      end
+    validate_positive_integer!(:batch_size, batch_size)
+    validate_non_negative_integer!(:max_retries, max_retries)
+    validate_row_set!(Keyword.get(opts, :rows))
 
-    read_opts = Keyword.drop(opts, [:batch_size, :rows_limit])
+    unless is_function(read_fun, 4) do
+      raise ArgumentError, ":read_fun must be a 4-arity function, got: #{inspect(read_fun)}"
+    end
+
+    read_opts = Keyword.drop(opts, [:batch_size, :rows_limit, :max_retries, :read_fun])
+
+    config = %{
+      project: project,
+      instance: instance,
+      table: table,
+      opts: read_opts,
+      batch_size: batch_size,
+      remaining: remaining,
+      max_retries: max_retries,
+      read_fun: read_fun
+    }
 
     Stream.resource(
-      fn -> init_stream(project, instance, table, read_opts, batch_size, remaining) end,
+      fn -> init_stream(config) end,
       fn state -> next_rows(state) end,
       fn state -> finish_stream(state) end
     )
@@ -256,9 +323,13 @@ defmodule MegasPinakas.Streaming do
   # ============================================================================
 
   @doc """
-  Counts rows in a stream without loading all data.
+  Counts the rows matching the criteria.
 
-  More efficient than `Enum.count/1` as it doesn't need to keep rows in memory.
+  Every matching row still has to be read — BigTable has no server-side count —
+  but memory stays bounded by `:batch_size`. When no `:filter` is given, cell
+  values are stripped and each row is reduced to a single cell on the server, so
+  only row keys cross the wire. A caller-supplied `:filter` is used verbatim, and
+  the row count then reflects rows with at least one cell surviving it.
 
   ## Examples
 
@@ -268,6 +339,24 @@ defmodule MegasPinakas.Streaming do
   """
   @spec count_rows(String.t(), String.t(), String.t(), keyword()) :: non_neg_integer()
   def count_rows(project, instance, table, opts \\ []) do
+    # Only row keys need to cross the wire. An explicit `filter: nil` counts as
+    # "no filter given".
+    opts =
+      case Keyword.get(opts, :filter) do
+        nil ->
+          Keyword.put(
+            opts,
+            :filter,
+            Filter.chain_filters([
+              Filter.strip_value_filter(),
+              Filter.cells_per_row_limit_filter(1)
+            ])
+          )
+
+        _filter ->
+          opts
+      end
+
     stream_rows(project, instance, table, opts)
     |> Enum.reduce(0, fn _row, acc -> acc + 1 end)
   end
@@ -275,7 +364,7 @@ defmodule MegasPinakas.Streaming do
   @doc """
   Checks if any rows exist matching the criteria.
 
-  Stops as soon as one row is found.
+  Issues a single request for at most one row.
 
   ## Examples
 
@@ -285,13 +374,13 @@ defmodule MegasPinakas.Streaming do
   """
   @spec rows_exist?(String.t(), String.t(), String.t(), keyword()) :: boolean()
   def rows_exist?(project, instance, table, opts \\ []) do
-    stream_rows(project, instance, table, opts)
-    |> Enum.take(1)
-    |> length() > 0
+    first_row(project, instance, table, opts) != :none
   end
 
   @doc """
   Gets the first row matching the criteria, if any.
+
+  Issues a single request for at most one row.
 
   ## Examples
 
@@ -304,18 +393,70 @@ defmodule MegasPinakas.Streaming do
   """
   @spec first_row(String.t(), String.t(), String.t(), keyword()) :: {:ok, term()} | :none
   def first_row(project, instance, table, opts \\ []) do
-    case stream_rows(project, instance, table, opts) |> Enum.take(1) do
+    opts = Keyword.merge(opts, rows_limit: 1, batch_size: 1)
+
+    # `rows_limit: 1` bounds the stream to one row, so draining it (rather than
+    # `Enum.take(1)`) lets the resource halt itself and emit `:stop`, not
+    # `:cancelled`.
+    case stream_rows(project, instance, table, opts) |> Enum.to_list() do
       [row] -> {:ok, row}
       [] -> :none
     end
   end
 
   # ============================================================================
+  # Private Helpers - Option validation
+  # ============================================================================
+
+  # A `:rows_limit` of 0 means "no limit" in the ReadRows proto; normalize it so
+  # it cannot be confused with "yield nothing".
+  defp normalize_rows_limit(nil), do: :infinity
+  defp normalize_rows_limit(0), do: :infinity
+  defp normalize_rows_limit(limit) when is_integer(limit) and limit > 0, do: limit
+
+  defp normalize_rows_limit(other) do
+    raise ArgumentError,
+          ":rows_limit must be a non-negative integer or nil, got: #{inspect(other)}"
+  end
+
+  defp validate_positive_integer!(_name, value) when is_integer(value) and value > 0, do: :ok
+
+  defp validate_positive_integer!(name, value) do
+    raise ArgumentError, "#{inspect(name)} must be a positive integer, got: #{inspect(value)}"
+  end
+
+  defp validate_non_negative_integer!(_name, value) when is_integer(value) and value >= 0,
+    do: :ok
+
+  defp validate_non_negative_integer!(name, value) do
+    raise ArgumentError,
+          "#{inspect(name)} must be a non-negative integer, got: #{inspect(value)}"
+  end
+
+  defp validate_row_set!(nil), do: :ok
+  defp validate_row_set!(%RowSet{}), do: :ok
+
+  defp validate_row_set!(other) do
+    raise ArgumentError, """
+    Cannot paginate #{inspect(other)}.
+
+    The :rows option must be a %Google.Bigtable.V2.RowSet{} (see \
+    MegasPinakas.row_set/1 and MegasPinakas.row_set_from_ranges/1) or nil.
+    """
+  end
+
+  # ============================================================================
   # Private Helpers - Stream Implementation
   # ============================================================================
 
-  defp init_stream(project, instance, table, opts, batch_size, remaining) do
-    metadata = %{project: project, instance: instance, table: table, batch_size: batch_size}
+  defp init_stream(config) do
+    metadata = %{
+      project: config.project,
+      instance: config.instance,
+      table: config.table,
+      batch_size: config.batch_size,
+      stream_ref: make_ref()
+    }
 
     :telemetry.execute(
       [:megas_pinakas, :stream, :start],
@@ -323,31 +464,31 @@ defmodule MegasPinakas.Streaming do
       metadata
     )
 
-    %{
-      project: project,
-      instance: instance,
-      table: table,
-      opts: opts,
-      batch_size: batch_size,
-      remaining: remaining,
+    Map.merge(config, %{
       buffer: [],
       last_key: nil,
+      # The server has nothing more to send; drain the buffer and stop.
+      exhausted: false,
+      # The stream halted itself, as opposed to being abandoned by the consumer.
       done: false,
       # For the closing telemetry event.
       metadata: metadata,
       start_time: System.monotonic_time(),
       emitted: 0,
       batches: 0
-    }
+    })
   end
 
   # `Stream.resource/3` runs this on both natural exhaustion and early
   # termination, and does not say which. `done: true` is only ever set by a clause
-  # that halted the stream itself, so it distinguishes the two.
+  # that halted the stream itself, so it distinguishes the two. A raise from
+  # `next_rows/1` arrives here with the pre-call state, so a failed stream is
+  # reported as `:cancelled` — after the `:exception` event the error clause
+  # emits itself.
   defp finish_stream(%{done: true} = state), do: emit_stream_event(:stop, state)
   defp finish_stream(state), do: emit_stream_event(:cancelled, state)
 
-  defp emit_stream_event(event, state) do
+  defp emit_stream_event(event, state, extra_metadata \\ %{}) do
     :telemetry.execute(
       [:megas_pinakas, :stream, event],
       %{
@@ -355,53 +496,43 @@ defmodule MegasPinakas.Streaming do
         rows_emitted: state.emitted,
         batches: state.batches
       },
-      state.metadata
+      Map.merge(state.metadata, extra_metadata)
     )
 
     :ok
   end
 
-  defp next_rows(%{done: true} = state) do
-    {:halt, state}
-  end
-
-  # The caller's :rows_limit is satisfied. Previously this option was overwritten
-  # by :batch_size and silently ignored, so `stream_rows(..., rows_limit: 10)`
-  # streamed the entire table.
+  # The caller's :rows_limit is satisfied.
   defp next_rows(%{remaining: 0} = state) do
     {:halt, %{state | done: true}}
   end
 
   defp next_rows(%{buffer: [row | rest]} = state) do
-    {[row],
-     %{
-       state
-       | buffer: rest,
-         last_key: MegasPinakas.row_key(row),
-         emitted: state.emitted + 1,
-         remaining: decrement(state.remaining)
-     }}
+    {[row], emit_row(state, row, rest)}
+  end
+
+  defp next_rows(%{buffer: [], exhausted: true} = state) do
+    {:halt, %{state | done: true}}
   end
 
   defp next_rows(%{buffer: []} = state) do
-    # Need to fetch more rows
-    case fetch_batch(state) do
+    case fetch_batch(state, 0) do
       :exhausted ->
         {:halt, %{state | done: true}}
 
       {:ok, []} ->
         {:halt, %{state | done: true}}
 
-      {:ok, [first | rest]} ->
-        {[first],
-         %{
-           state
-           | buffer: rest,
-             last_key: MegasPinakas.row_key(first),
-             emitted: state.emitted + 1,
-             remaining: decrement(state.remaining),
-             batches: state.batches + 1
-         }}
+      {:ok, [first | rest] = rows} ->
+        # A batch shorter than the limit requested proves the row set has no more
+        # rows, so the next demand halts instead of issuing an empty probe RPC.
+        state = %{
+          state
+          | batches: state.batches + 1,
+            exhausted: length(rows) < batch_limit(state)
+        }
+
+        {[first], emit_row(state, first, rest)}
 
       {:error, reason} ->
         # Raise rather than halt. Halting quietly would make `Enum.to_list/1`
@@ -409,46 +540,81 @@ defmodule MegasPinakas.Streaming do
         # from a complete result — the streaming form of the silent truncation
         # fixed in `read_rows/4`.
         Logger.warning("BigTable stream pagination error: #{inspect(reason)}")
+        emit_stream_event(:exception, state, %{reason: reason})
 
-        raise MegasPinakas.StreamError, reason: reason, last_key: state.last_key
+        raise StreamError, reason: reason, last_key: state.last_key
     end
   end
 
+  defp emit_row(state, row, rest) do
+    %{
+      state
+      | buffer: rest,
+        last_key: MegasPinakas.row_key(row),
+        emitted: state.emitted + 1,
+        remaining: decrement(state.remaining)
+    }
+  end
+
+  # Re-issues the same batch on a transient failure. `last_key` is untouched
+  # between attempts, so the request is byte-identical and no row is skipped.
+  defp fetch_batch(state, attempt) do
+    case do_fetch_batch(state) do
+      {:error, reason} = error ->
+        if retryable?(reason) and attempt < state.max_retries do
+          Logger.warning(
+            "BigTable stream batch failed, retrying (#{attempt + 1}/#{state.max_retries}): " <>
+              inspect(reason)
+          )
+
+          :telemetry.execute(
+            [:megas_pinakas, :stream, :retry],
+            %{attempt: attempt + 1},
+            Map.put(state.metadata, :reason, reason)
+          )
+
+          Process.sleep(backoff_ms(attempt))
+          fetch_batch(state, attempt + 1)
+        else
+          error
+        end
+
+      result ->
+        result
+    end
+  end
+
+  # `read_rows/4` reports an RPC failure as `{status, message}` and a failure
+  # partway through the response stream as `{:incomplete_read, {status, message}}`.
+  defp retryable?({:incomplete_read, reason}), do: retryable?(reason)
+  defp retryable?({status, _message}) when status in @retryable_statuses, do: true
+  defp retryable?(_reason), do: false
+
+  defp backoff_ms(attempt) do
+    min(@backoff_base_ms * Integer.pow(2, attempt), @backoff_cap_ms)
+  end
+
   # The first request uses the caller's row set verbatim.
-  defp fetch_batch(%{last_key: nil, opts: opts} = state) do
+  defp do_fetch_batch(%{last_key: nil, opts: opts} = state) do
     read_batch(state, opts)
   end
 
-  defp fetch_batch(%{last_key: last_key, opts: opts} = state) do
+  defp do_fetch_batch(%{last_key: last_key, opts: opts} = state) do
     case advance_row_set(Keyword.get(opts, :rows), last_key) do
       {:ok, row_set} -> read_batch(state, Keyword.put(opts, :rows, row_set))
       :exhausted -> :exhausted
     end
   end
 
-  defp read_batch(
-         %{
-           project: project,
-           instance: instance,
-           table: table,
-           batch_size: batch_size,
-           remaining: remaining
-         },
-         opts
-       ) do
-    # Never request more than the caller's outstanding :rows_limit, so the last
-    # batch of a limited stream does not fetch rows that will be thrown away.
-    MegasPinakas.read_rows(
-      project,
-      instance,
-      table,
-      Keyword.put(opts, :rows_limit, batch_limit(batch_size, remaining))
-    )
+  defp read_batch(%{project: project, instance: instance, table: table} = state, opts) do
+    state.read_fun.(project, instance, table, Keyword.put(opts, :rows_limit, batch_limit(state)))
   end
 
-  defp batch_limit(batch_size, :infinity), do: batch_size
+  # Never request more than the caller's outstanding :rows_limit, so the last
+  # batch of a limited stream does not fetch rows that will be thrown away.
+  defp batch_limit(%{batch_size: batch_size, remaining: :infinity}), do: batch_size
 
-  defp batch_limit(batch_size, remaining) when is_integer(remaining),
+  defp batch_limit(%{batch_size: batch_size, remaining: remaining}) when is_integer(remaining),
     do: min(batch_size, remaining)
 
   defp decrement(:infinity), do: :infinity
@@ -490,15 +656,6 @@ defmodule MegasPinakas.Streaming do
     else
       {:ok, %RowSet{row_keys: remaining_keys, row_ranges: remaining_ranges}}
     end
-  end
-
-  defp advance_row_set(other, _last_key) do
-    raise ArgumentError, """
-    Cannot paginate #{inspect(other)}.
-
-    The :rows option must be a %Google.Bigtable.V2.RowSet{} (see \
-    MegasPinakas.row_set/1 and MegasPinakas.row_set_from_ranges/1) or nil.
-    """
   end
 
   # Drops ranges already fully consumed and raises the start bound of the rest.

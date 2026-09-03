@@ -1,25 +1,16 @@
 import Config
 
 # Runtime configuration
-# These settings can be overridden by environment variables at runtime
+# These settings can be overridden by environment variables at runtime.
+#
+# BIGTABLE_EMULATOR_HOST needs no entry here: MegasPinakas.Config reads it at
+# runtime (see `MegasPinakas.Config.emulator_endpoint/0`) and it takes
+# precedence over any `:emulator` app config.
 
 if config_env() == :prod do
-  # Check for BIGTABLE_EMULATOR_HOST environment variable
-  # This allows overriding production to use an emulator if needed
-  if emulator_host = System.get_env("BIGTABLE_EMULATOR_HOST") do
-    [host, port] =
-      case String.split(emulator_host, ":") do
-        [h, p] -> [h, String.to_integer(p)]
-        [h] -> [h, 8086]
-      end
-
-    config :megas_pinakas, :emulator,
-      host: host,
-      port: port
-  end
-
-  # Optional: Configure Goth for authentication
-  # Requires adding {:goth, "~> 1.4"} to dependencies
+  # Optional: Configure Goth for authentication. Goth is an optional dependency
+  # of MegasPinakas — add {:goth, "~> 1.4"} to your own deps and start a Goth
+  # process under this name in your supervision tree.
   if goth_name = System.get_env("MEGAS_PINAKAS_GOTH_NAME") do
     config :megas_pinakas, :goth, String.to_atom(goth_name)
   end

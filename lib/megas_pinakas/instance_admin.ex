@@ -4,12 +4,22 @@ defmodule MegasPinakas.InstanceAdmin do
 
   This module provides functions for creating, modifying, and deleting instances,
   clusters, and app profiles.
+
+  Instance admin RPCs are served by `bigtableadmin.googleapis.com`, not the Data
+  API host, so every function here runs on `MegasPinakas.Client.admin_pool/0`
+  (in emulator mode both pools point at the emulator).
+
+  Functions documented as returning a long-running operation hand back a
+  `Google.Longrunning.Operation`; resolve it with
+  `MegasPinakas.Admin.wait_operation/2`.
   """
 
   alias MegasPinakas.{Auth, Client, Config}
 
   alias Google.Bigtable.Admin.V2.{
     AppProfile,
+    AutoscalingLimits,
+    AutoscalingTargets,
     BigtableInstanceAdmin.Stub,
     Cluster,
     CreateAppProfileRequest,
@@ -28,6 +38,7 @@ defmodule MegasPinakas.InstanceAdmin do
     ListClustersResponse,
     ListInstancesRequest,
     ListInstancesResponse,
+    PartialUpdateClusterRequest,
     PartialUpdateInstanceRequest,
     UpdateAppProfileRequest
   }
@@ -39,7 +50,9 @@ defmodule MegasPinakas.InstanceAdmin do
   @doc """
   Creates a new BigTable instance.
 
-  Returns a long-running operation that can be monitored.
+  Returns a long-running operation; resolve it with
+  `MegasPinakas.Admin.wait_operation/2` to get the created
+  `Google.Bigtable.Admin.V2.Instance`.
 
   ## Options
 
@@ -60,6 +73,7 @@ defmodule MegasPinakas.InstanceAdmin do
         "project", "my-instance", clusters,
         display_name: "My Instance",
         type: :PRODUCTION)
+      {:ok, instance} = MegasPinakas.Admin.wait_operation(operation)
   """
   @spec create_instance(String.t(), String.t(), map(), keyword()) ::
           {:ok, Google.Longrunning.Operation.t()} | {:error, term()}
@@ -97,7 +111,7 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.create_instance(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
@@ -118,7 +132,7 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.get_instance(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
@@ -145,13 +159,16 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.list_instances(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
   Partially updates a BigTable instance.
 
-  Returns a long-running operation that can be monitored.
+  Only the options given are written; everything else on the instance is left
+  untouched. Returns a long-running operation; resolve it with
+  `MegasPinakas.Admin.wait_operation/2` to get the updated
+  `Google.Bigtable.Admin.V2.Instance`.
 
   ## Options
 
@@ -164,6 +181,7 @@ defmodule MegasPinakas.InstanceAdmin do
       {:ok, operation} = MegasPinakas.InstanceAdmin.partial_update_instance(
         "project", "my-instance",
         display_name: "New Name")
+      {:ok, instance} = MegasPinakas.Admin.wait_operation(operation)
   """
   @spec partial_update_instance(String.t(), String.t(), keyword()) ::
           {:ok, Google.Longrunning.Operation.t()} | {:error, term()}
@@ -194,7 +212,7 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.partial_update_instance(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
@@ -216,7 +234,7 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.delete_instance(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   # ============================================================================
@@ -226,7 +244,9 @@ defmodule MegasPinakas.InstanceAdmin do
   @doc """
   Creates a new cluster in an instance.
 
-  Returns a long-running operation that can be monitored.
+  Returns a long-running operation; resolve it with
+  `MegasPinakas.Admin.wait_operation/2` to get the created
+  `Google.Bigtable.Admin.V2.Cluster`.
 
   ## Options
 
@@ -239,6 +259,7 @@ defmodule MegasPinakas.InstanceAdmin do
         "project", "instance", "new-cluster", "us-east1-b",
         serve_nodes: 3,
         storage_type: :SSD)
+      {:ok, cluster} = MegasPinakas.Admin.wait_operation(operation)
   """
   @spec create_cluster(String.t(), String.t(), String.t(), String.t(), keyword()) ::
           {:ok, Google.Longrunning.Operation.t()} | {:error, term()}
@@ -260,7 +281,7 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.create_cluster(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
@@ -282,7 +303,7 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.get_cluster(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
@@ -309,39 +330,114 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.list_clusters(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
-  Updates a cluster.
+  Replaces a cluster's node count.
 
-  Returns a long-running operation that can be monitored.
+  `UpdateCluster` is a full-replace RPC: whatever is sent becomes the cluster's
+  configuration, so `:serve_nodes` is required and the call raises
+  `ArgumentError` without it (omitting it would silently request 0 nodes). To
+  change a single field, or to switch to autoscaling, use
+  `partial_update_cluster/4`.
+
+  Returns a long-running operation; resolve it with
+  `MegasPinakas.Admin.wait_operation/2` to get the updated
+  `Google.Bigtable.Admin.V2.Cluster`.
 
   ## Options
 
-    * `:serve_nodes` - New number of serve nodes
+    * `:serve_nodes` - New number of serve nodes (required, positive integer)
 
   ## Examples
 
       {:ok, operation} = MegasPinakas.InstanceAdmin.update_cluster(
         "project", "instance", "cluster",
         serve_nodes: 5)
+      {:ok, cluster} = MegasPinakas.Admin.wait_operation(operation)
   """
   @spec update_cluster(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, Google.Longrunning.Operation.t()} | {:error, term()}
   def update_cluster(project_id, instance_id, cluster_id, opts \\ []) do
+    serve_nodes = fetch_serve_nodes!(opts)
+
     operation = fn channel ->
       # UpdateCluster RPC takes a Cluster directly
       cluster = %Cluster{
         name: Config.cluster_path(project_id, instance_id, cluster_id),
-        serve_nodes: Keyword.get(opts, :serve_nodes, 0)
+        serve_nodes: serve_nodes
       }
 
       auth_opts = Auth.request_opts()
       Stub.update_cluster(channel, cluster, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
+  end
+
+  @doc """
+  Updates only the given fields of a cluster.
+
+  Unlike `update_cluster/4`, fields not mentioned keep their current values.
+  At least one option is required; giving none raises `ArgumentError`. Setting
+  `:serve_nodes` on an autoscaled cluster switches it to manual scaling, and
+  setting `:autoscaling` on a manually scaled cluster enables autoscaling;
+  giving both raises `ArgumentError`.
+
+  Returns a long-running operation; resolve it with
+  `MegasPinakas.Admin.wait_operation/2` to get the updated
+  `Google.Bigtable.Admin.V2.Cluster`.
+
+  ## Options
+
+    * `:serve_nodes` - New number of serve nodes (positive integer)
+    * `:autoscaling` - Map with `:min_serve_nodes`, `:max_serve_nodes`,
+      `:cpu_utilization_percent`, and optional `:storage_utilization_gib_per_node`
+      (string keys are accepted too)
+
+  ## Examples
+
+      {:ok, operation} = MegasPinakas.InstanceAdmin.partial_update_cluster(
+        "project", "instance", "cluster",
+        autoscaling: %{min_serve_nodes: 1, max_serve_nodes: 5, cpu_utilization_percent: 60})
+      {:ok, cluster} = MegasPinakas.Admin.wait_operation(operation)
+
+  > #### Emulator {: .warning}
+  >
+  > The BigTable emulator does not implement `PartialUpdateCluster` (it crashes
+  > on the call); only use this against real BigTable.
+  """
+  @spec partial_update_cluster(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, Google.Longrunning.Operation.t()} | {:error, term()}
+  def partial_update_cluster(project_id, instance_id, cluster_id, opts) do
+    request = partial_update_cluster_request(project_id, instance_id, cluster_id, opts)
+
+    operation = fn channel ->
+      auth_opts = Auth.request_opts()
+      Stub.partial_update_cluster(channel, request, auth_opts)
+    end
+
+    Client.execute(operation, pool: Client.admin_pool())
+  end
+
+  # Public so the mask/body agreement can be tested without a server; the
+  # emulator crashes on PartialUpdateCluster.
+  @doc false
+  @spec partial_update_cluster_request(String.t(), String.t(), String.t(), keyword()) ::
+          PartialUpdateClusterRequest.t()
+  def partial_update_cluster_request(project_id, instance_id, cluster_id, opts) do
+    {cluster_fields, paths} = partial_cluster_update!(opts)
+
+    cluster =
+      struct!(Cluster, [
+        {:name, Config.cluster_path(project_id, instance_id, cluster_id)} | cluster_fields
+      ])
+
+    %PartialUpdateClusterRequest{
+      cluster: cluster,
+      update_mask: %Google.Protobuf.FieldMask{paths: paths}
+    }
   end
 
   @doc """
@@ -363,7 +459,7 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.delete_cluster(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   # ============================================================================
@@ -373,11 +469,17 @@ defmodule MegasPinakas.InstanceAdmin do
   @doc """
   Creates a new app profile.
 
+  Routing defaults to multi-cluster when neither routing option is given. Giving
+  both, or `multi_cluster_routing: false`, raises `ArgumentError` (to route to
+  a single cluster, pass `:single_cluster_routing` instead).
+
   ## Options
 
     * `:description` - Description of the app profile
-    * `:multi_cluster_routing` - Enable multi-cluster routing (boolean)
-    * `:single_cluster_routing` - Single cluster routing config map with `:cluster_id` and `:allow_transactional_writes`
+    * `:multi_cluster_routing` - `true` to route to any cluster
+    * `:single_cluster_routing` - Map with `:cluster_id` (required) and
+      `:allow_transactional_writes` (default `false`); string keys are accepted
+    * `:ignore_warnings` - Ignore warnings (default: false)
 
   ## Examples
 
@@ -398,27 +500,37 @@ defmodule MegasPinakas.InstanceAdmin do
   @spec create_app_profile(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, AppProfile.t()} | {:error, term()}
   def create_app_profile(project_id, instance_id, app_profile_id, opts \\ []) do
+    request = create_app_profile_request(project_id, instance_id, app_profile_id, opts)
+
     operation = fn channel ->
-      default_routing = {:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}}
-      routing_policy = build_routing_policy(opts, default_routing)
-
-      app_profile = %AppProfile{
-        description: Keyword.get(opts, :description, ""),
-        routing_policy: routing_policy
-      }
-
-      request = %CreateAppProfileRequest{
-        parent: Config.instance_path(project_id, instance_id),
-        app_profile_id: app_profile_id,
-        app_profile: app_profile,
-        ignore_warnings: Keyword.get(opts, :ignore_warnings, false)
-      }
-
       auth_opts = Auth.request_opts()
       Stub.create_app_profile(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
+  end
+
+  @doc false
+  @spec create_app_profile_request(String.t(), String.t(), String.t(), keyword()) ::
+          CreateAppProfileRequest.t()
+  def create_app_profile_request(project_id, instance_id, app_profile_id, opts) do
+    routing_policy =
+      case routing_policy!(opts) do
+        nil -> {:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}}
+        {policy, _path} -> policy
+      end
+
+    app_profile = %AppProfile{
+      description: Keyword.get(opts, :description, ""),
+      routing_policy: routing_policy
+    }
+
+    %CreateAppProfileRequest{
+      parent: Config.instance_path(project_id, instance_id),
+      app_profile_id: app_profile_id,
+      app_profile: app_profile,
+      ignore_warnings: Keyword.get(opts, :ignore_warnings, false)
+    }
   end
 
   @doc """
@@ -440,7 +552,7 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.get_app_profile(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
@@ -469,19 +581,29 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.list_app_profiles(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   @doc """
   Updates an app profile.
 
-  Returns a long-running operation that can be monitored.
+  Only the options given are written: the update mask and the request body are
+  built from the same keys, so omitted fields keep their current values. At
+  least one of `:description`, `:multi_cluster_routing`, or
+  `:single_cluster_routing` is required. Giving both routing options, or
+  `multi_cluster_routing: false`, raises `ArgumentError` (to route to a single
+  cluster, pass `:single_cluster_routing` instead).
+
+  Returns a long-running operation; resolve it with
+  `MegasPinakas.Admin.wait_operation/2` to get the updated
+  `Google.Bigtable.Admin.V2.AppProfile`.
 
   ## Options
 
     * `:description` - New description
-    * `:multi_cluster_routing` - Enable multi-cluster routing
-    * `:single_cluster_routing` - Single cluster routing config
+    * `:multi_cluster_routing` - `true` to route to any cluster
+    * `:single_cluster_routing` - Map with `:cluster_id` (required) and
+      `:allow_transactional_writes` (default `false`); string keys are accepted
     * `:ignore_warnings` - Ignore warnings (default: false)
 
   ## Examples
@@ -489,38 +611,52 @@ defmodule MegasPinakas.InstanceAdmin do
       {:ok, operation} = MegasPinakas.InstanceAdmin.update_app_profile(
         "project", "instance", "profile",
         description: "Updated description")
+      {:ok, profile} = MegasPinakas.Admin.wait_operation(operation)
   """
   @spec update_app_profile(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, Google.Longrunning.Operation.t()} | {:error, term()}
   def update_app_profile(project_id, instance_id, app_profile_id, opts \\ []) do
+    request = update_app_profile_request(project_id, instance_id, app_profile_id, opts)
+
     operation = fn channel ->
-      routing_policy = build_routing_policy(opts, nil)
-
-      app_profile = %AppProfile{
-        name: Config.app_profile_path(project_id, instance_id, app_profile_id),
-        description: Keyword.get(opts, :description),
-        routing_policy: routing_policy
-      }
-
-      # Build update mask
-      paths =
-        []
-        |> maybe_add_path(opts, :description, "description")
-        |> maybe_add_routing_path(opts)
-
-      update_mask = %Google.Protobuf.FieldMask{paths: paths}
-
-      request = %UpdateAppProfileRequest{
-        app_profile: app_profile,
-        update_mask: update_mask,
-        ignore_warnings: Keyword.get(opts, :ignore_warnings, false)
-      }
-
       auth_opts = Auth.request_opts()
       Stub.update_app_profile(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
+  end
+
+  # Public so the mask/body agreement can be tested without a server; the
+  # emulator does not implement UpdateAppProfile.
+  @doc false
+  @spec update_app_profile_request(String.t(), String.t(), String.t(), keyword()) ::
+          UpdateAppProfileRequest.t()
+  def update_app_profile_request(project_id, instance_id, app_profile_id, opts) do
+    {routing_policy, paths} =
+      case routing_policy!(opts) do
+        nil -> {nil, []}
+        {policy, path} -> {policy, [path]}
+      end
+
+    paths = maybe_add_path(paths, opts, :description, "description")
+
+    if paths == [] do
+      raise ArgumentError,
+            "update_app_profile/4 needs at least one of :description, " <>
+              ":multi_cluster_routing, or :single_cluster_routing"
+    end
+
+    app_profile = %AppProfile{
+      name: Config.app_profile_path(project_id, instance_id, app_profile_id),
+      description: Keyword.get(opts, :description, ""),
+      routing_policy: routing_policy
+    }
+
+    %UpdateAppProfileRequest{
+      app_profile: app_profile,
+      update_mask: %Google.Protobuf.FieldMask{paths: paths},
+      ignore_warnings: Keyword.get(opts, :ignore_warnings, false)
+    }
   end
 
   @doc """
@@ -547,12 +683,16 @@ defmodule MegasPinakas.InstanceAdmin do
       Stub.delete_app_profile(channel, request, auth_opts)
     end
 
-    Client.execute(operation)
+    Client.execute(operation, pool: Client.admin_pool())
   end
 
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  # Argument shape is checked in these helpers, before Client.execute/2, so a
+  # bad call raises ArgumentError instead of surfacing as
+  # {:error, {:execution_error, _}} from inside the operation closure.
 
   defp maybe_add_path(paths, opts, key, path_name) do
     if Keyword.has_key?(opts, key) do
@@ -562,35 +702,159 @@ defmodule MegasPinakas.InstanceAdmin do
     end
   end
 
-  defp maybe_add_routing_path(paths, opts) do
-    cond do
-      Keyword.has_key?(opts, :multi_cluster_routing) ->
-        ["multi_cluster_routing_use_any" | paths]
+  defp fetch_serve_nodes!(opts) do
+    case Keyword.fetch(opts, :serve_nodes) do
+      {:ok, n} when is_integer(n) and n > 0 ->
+        n
 
-      Keyword.has_key?(opts, :single_cluster_routing) ->
-        ["single_cluster_routing" | paths]
+      {:ok, other} ->
+        raise ArgumentError, ":serve_nodes must be a positive integer, got: #{inspect(other)}"
 
-      true ->
-        paths
+      :error ->
+        raise ArgumentError,
+              "update_cluster/4 requires :serve_nodes because UpdateCluster replaces the whole " <>
+                "cluster; use partial_update_cluster/4 to change other fields"
     end
   end
 
-  defp build_routing_policy(opts, default) do
-    cond do
-      Keyword.get(opts, :multi_cluster_routing) ->
-        {:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}}
+  # Returns {cluster struct fields, field mask paths} for PartialUpdateCluster.
+  defp partial_cluster_update!(opts) do
+    has_serve_nodes = Keyword.has_key?(opts, :serve_nodes)
+    has_autoscaling = Keyword.has_key?(opts, :autoscaling)
 
-      single_cluster = Keyword.get(opts, :single_cluster_routing) ->
-        {:single_cluster_routing,
-         %AppProfile.SingleClusterRouting{
-           cluster_id: single_cluster[:cluster_id] || single_cluster["cluster_id"],
-           allow_transactional_writes:
-             single_cluster[:allow_transactional_writes] ||
-               single_cluster["allow_transactional_writes"] || false
-         }}
+    cond do
+      has_serve_nodes and has_autoscaling ->
+        raise ArgumentError,
+              ":serve_nodes and :autoscaling are mutually exclusive; a cluster is either " <>
+                "manually scaled or autoscaled"
+
+      has_serve_nodes ->
+        # Disabling autoscaling requires clearing cluster_autoscaling_config AND
+        # setting serve_nodes in the same mask; `config: nil` in the body plus
+        # this path is what clears it. A mask of just "serve_nodes" is rejected
+        # on an autoscaled cluster.
+        {[serve_nodes: fetch_serve_nodes!(opts)],
+         ["serve_nodes", "cluster_config.cluster_autoscaling_config"]}
+
+      has_autoscaling ->
+        config = %Cluster.ClusterConfig{
+          cluster_autoscaling_config: autoscaling_config!(Keyword.fetch!(opts, :autoscaling))
+        }
+
+        {[config: {:cluster_config, config}], ["cluster_config.cluster_autoscaling_config"]}
 
       true ->
-        default
+        raise ArgumentError,
+              "partial_update_cluster/4 needs at least one of :serve_nodes or :autoscaling"
     end
+  end
+
+  defp autoscaling_config!(config) when is_map(config) do
+    min_nodes = fetch_positive_int!(config, :min_serve_nodes)
+    max_nodes = fetch_positive_int!(config, :max_serve_nodes)
+    cpu = fetch_positive_int!(config, :cpu_utilization_percent)
+
+    storage =
+      config[:storage_utilization_gib_per_node] || config["storage_utilization_gib_per_node"]
+
+    if max_nodes < min_nodes do
+      raise ArgumentError,
+            ":autoscaling max_serve_nodes (#{max_nodes}) must be >= min_serve_nodes (#{min_nodes})"
+    end
+
+    unless is_nil(storage) or (is_integer(storage) and storage > 0) do
+      raise ArgumentError,
+            ":autoscaling storage_utilization_gib_per_node must be a positive integer, " <>
+              "got: #{inspect(storage)}"
+    end
+
+    %Cluster.ClusterAutoscalingConfig{
+      autoscaling_limits: %AutoscalingLimits{
+        min_serve_nodes: min_nodes,
+        max_serve_nodes: max_nodes
+      },
+      autoscaling_targets: %AutoscalingTargets{
+        cpu_utilization_percent: cpu,
+        storage_utilization_gib_per_node: storage || 0
+      }
+    }
+  end
+
+  defp autoscaling_config!(other) do
+    raise ArgumentError,
+          ":autoscaling must be a map with :min_serve_nodes, :max_serve_nodes, and " <>
+            ":cpu_utilization_percent, got: #{inspect(other)}"
+  end
+
+  defp fetch_positive_int!(config, key) do
+    case config[key] || config[Atom.to_string(key)] do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      other ->
+        raise ArgumentError,
+              ":autoscaling #{key} must be a positive integer, got: #{inspect(other)}"
+    end
+  end
+
+  # Returns {routing_policy oneof, field mask path} for the routing option
+  # given, or nil when neither routing option is present.
+  defp routing_policy!(opts) do
+    multi = Keyword.fetch(opts, :multi_cluster_routing)
+    single = Keyword.fetch(opts, :single_cluster_routing)
+
+    case {multi, single} do
+      {{:ok, _}, {:ok, _}} ->
+        raise ArgumentError,
+              ":multi_cluster_routing and :single_cluster_routing are mutually exclusive"
+
+      {{:ok, true}, :error} ->
+        {{:multi_cluster_routing_use_any, %AppProfile.MultiClusterRoutingUseAny{}},
+         "multi_cluster_routing_use_any"}
+
+      {{:ok, other}, :error} ->
+        raise ArgumentError,
+              ":multi_cluster_routing must be true (pass :single_cluster_routing to route " <>
+                "to one cluster), got: #{inspect(other)}"
+
+      {:error, {:ok, config}} ->
+        {{:single_cluster_routing, single_cluster_routing!(config)}, "single_cluster_routing"}
+
+      {:error, :error} ->
+        nil
+    end
+  end
+
+  defp single_cluster_routing!(config) when is_map(config) do
+    cluster_id = config[:cluster_id] || config["cluster_id"]
+
+    unless is_binary(cluster_id) and cluster_id != "" do
+      raise ArgumentError,
+            ":single_cluster_routing requires a non-empty :cluster_id, got: #{inspect(config)}"
+    end
+
+    allow_writes =
+      case {Map.fetch(config, :allow_transactional_writes),
+            Map.fetch(config, "allow_transactional_writes")} do
+        {{:ok, value}, _} -> value
+        {:error, {:ok, value}} -> value
+        {:error, :error} -> false
+      end
+
+    unless is_boolean(allow_writes) do
+      raise ArgumentError,
+            ":single_cluster_routing allow_transactional_writes must be a boolean, " <>
+              "got: #{inspect(allow_writes)}"
+    end
+
+    %AppProfile.SingleClusterRouting{
+      cluster_id: cluster_id,
+      allow_transactional_writes: allow_writes
+    }
+  end
+
+  defp single_cluster_routing!(other) do
+    raise ArgumentError,
+          ":single_cluster_routing must be a map with :cluster_id, got: #{inspect(other)}"
   end
 end

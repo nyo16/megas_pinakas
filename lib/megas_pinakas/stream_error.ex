@@ -8,6 +8,14 @@ defmodule MegasPinakas.StreamError do
   complete result — the same silent-truncation failure that `read_rows/4` avoids
   by returning `{:error, {:incomplete_read, reason}}`.
 
+  ## Fields
+
+    * `reason` — the normalized failure, `{status_atom, message}` for a gRPC
+      error (see `MegasPinakas.Response.normalize_reason/1`)
+    * `last_key` — the key of the last row **delivered to the consumer** before
+      the failure, or `nil` if none was. Every row the failed stream fetched had
+      been delivered, so a resumed read can start strictly after this key
+
   Rescue it if partial results are acceptable for your use case:
 
       try do
@@ -29,10 +37,11 @@ defmodule MegasPinakas.StreamError do
   @impl true
   def message(%__MODULE__{reason: reason, last_key: last_key}) do
     """
-    BigTable stream failed after row #{inspect(last_key)}: #{inspect(reason)}
+    BigTable stream failed after delivering row #{inspect(last_key)}: #{inspect(reason)}
 
-    Rows up to and including that key were delivered; the rest were not. \
-    Resume from this key rather than restarting if the read is idempotent.
+    Rows up to and including that key were delivered to the consumer; the rest \
+    were not. Resume from strictly after this key rather than restarting if the \
+    read is idempotent.
     """
   end
 end

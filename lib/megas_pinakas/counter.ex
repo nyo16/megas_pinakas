@@ -5,6 +5,13 @@ defmodule MegasPinakas.Counter do
   Provides high-level operations for counters that need atomic increments/decrements.
   Uses BigTable's `read_modify_write_row` for atomicity guarantees.
 
+  ## Column family configuration
+
+  Every increment writes a new cell version; without garbage collection those
+  versions accumulate indefinitely. Configure the counter family with
+  `MegasPinakas.Admin.max_versions_gc_rule(1)`. Reads in this module only ever
+  fetch the latest version, so the extra versions cost storage, not correctness.
+
   ## Examples
 
       # Increment a page view counter
@@ -32,7 +39,11 @@ defmodule MegasPinakas.Counter do
   """
 
   alias MegasPinakas
+  alias MegasPinakas.Filter
   alias MegasPinakas.Types
+
+  # Compare-and-swap attempts before `increment_if_exists/8` reports contention.
+  @cas_attempts 5
 
   # ============================================================================
   # Basic Counter Operations
@@ -113,7 +124,14 @@ defmodule MegasPinakas.Counter do
   @doc """
   Gets the current value of a counter.
 
-  Returns `{:ok, nil}` if the counter doesn't exist.
+  Returns `{:ok, nil}` if the counter doesn't exist. Only the latest cell
+  version is fetched; a caller-supplied `:filter` is chained in front of that
+  restriction.
+
+  ## Options
+
+    * `:filter` - Additional `RowFilter` applied before the latest-version restriction
+    * `:app_profile_id` - App profile to use for the request
 
   ## Examples
 
@@ -124,7 +142,8 @@ defmodule MegasPinakas.Counter do
   @spec get(String.t(), String.t(), String.t(), binary(), String.t(), String.t(), keyword()) ::
           {:ok, integer() | nil} | {:error, term()}
   def get(project, instance, table, row_key, family, qualifier, opts \\ []) do
-    Types.read_integer(project, instance, table, row_key, family, qualifier, opts)
+    read_opts = Keyword.put(opts, :filter, latest_cell_filter(family, qualifier, opts))
+    Types.read_integer(project, instance, table, row_key, family, qualifier, read_opts)
   end
 
   @doc """
@@ -219,16 +238,29 @@ defmodule MegasPinakas.Counter do
   # ============================================================================
 
   @doc """
-  Increments a counter only if a predicate filter matches.
+  Increments a counter only if it already exists, via compare-and-swap.
 
-  This uses `check_and_mutate_row` with a filter predicate. Unlike `increment/8`,
-  this is not truly atomic in the read-modify-write sense, but provides conditional
-  mutation.
+  Reads the counter's current value, then issues a `check_and_mutate_row` whose
+  predicate matches only if the latest cell still holds exactly those bytes; the
+  true-branch writes `current + amount`. A concurrent writer makes the predicate
+  miss, in which case the read/CAS cycle is retried up to #{@cas_attempts} times.
+
+  Returns:
+
+    * `{:ok, :applied}` - the counter existed and was incremented
+    * `{:ok, :not_applied}` - the counter does not exist; nothing was written
+    * `{:error, :contention}` - every attempt lost a race with another writer
+
+  Unlike `increment/8`, this never creates the counter and does not return the
+  new value; call `get/7` if you need it.
+
+  ## Options
+
+    * `:app_profile_id` - App profile to use for the request
 
   ## Examples
 
-      # Only increment if the row exists (has any cells)
-      {:ok, result} = MegasPinakas.Counter.increment_if_exists(
+      {:ok, :applied} = MegasPinakas.Counter.increment_if_exists(
         project, instance, "counters", "row1", "cf", "views", 1
       )
   """
@@ -254,37 +286,61 @@ defmodule MegasPinakas.Counter do
         opts \\ []
       )
       when is_integer(amount) do
-    # Use pass_all_filter to check if any cells exist
-    predicate = MegasPinakas.pass_all_filter()
+    target = %{
+      project: project,
+      instance: instance,
+      table: table,
+      row_key: row_key,
+      family: family,
+      qualifier: qualifier,
+      opts: opts
+    }
 
-    # Create increment mutation - but check_and_mutate doesn't support read-modify-write
-    # So we need to do a conditional set instead. This is a limitation.
-    # For true conditional increment, you'd need to read first, then increment.
+    cas_increment(target, amount, @cas_attempts)
+  end
 
-    # For now, we implement a simpler version that just increments if row exists
-    # by using the pass_all filter as predicate
-    true_mutations = [Types.set_integer(family, qualifier, amount)]
+  defp cas_increment(_target, _amount, 0), do: {:error, :contention}
 
-    case MegasPinakas.check_and_mutate_row(
-           project,
-           instance,
-           table,
-           row_key,
-           predicate,
-           true_mutations,
-           [],
-           opts
-         ) do
-      {:ok, response} ->
-        if response.predicate_matched do
-          {:ok, :applied}
-        else
-          {:ok, :not_applied}
-        end
+  defp cas_increment(target, amount, attempts) do
+    %{project: project, instance: instance, table: table, row_key: row_key} = target
+    %{family: family, qualifier: qualifier, opts: opts} = target
+    read_opts = Keyword.put(opts, :filter, latest_cell_filter(family, qualifier, []))
 
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, row} <- MegasPinakas.read_row(project, instance, table, row_key, read_opts),
+         old_bytes when is_binary(old_bytes) <- MegasPinakas.get_cell(row, family, qualifier),
+         {:ok, old} <- Types.decode(:integer, old_bytes) do
+      case cas_swap(target, old_bytes, old + amount) do
+        {:ok, %{predicate_matched: true}} -> {:ok, :applied}
+        {:ok, %{predicate_matched: false}} -> cas_increment(target, amount, attempts - 1)
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      nil -> {:ok, :not_applied}
+      {:error, reason} -> {:error, reason}
     end
+  end
+
+  # Restrict to the latest version before comparing bytes: an un-GC'd older
+  # version holding the same value must not satisfy the predicate.
+  defp cas_swap(target, old_bytes, new_value) do
+    %{family: family, qualifier: qualifier} = target
+
+    predicate =
+      Filter.chain_filters([
+        latest_cell_filter(family, qualifier, []),
+        Filter.value_range_filter(start_value_closed: old_bytes, end_value_closed: old_bytes)
+      ])
+
+    MegasPinakas.check_and_mutate_row(
+      target.project,
+      target.instance,
+      target.table,
+      target.row_key,
+      predicate,
+      [Types.set_integer(family, qualifier, new_value)],
+      [],
+      target.opts
+    )
   end
 
   # ============================================================================
@@ -344,6 +400,17 @@ defmodule MegasPinakas.Counter do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  # The counter column, latest version only. A caller-provided `:filter` runs
+  # first so it can only narrow the result, never widen it to older versions.
+  defp latest_cell_filter(family, qualifier, opts) do
+    base = [Filter.column_filter(family, qualifier), Filter.cells_per_column_limit_filter(1)]
+
+    case Keyword.get(opts, :filter) do
+      nil -> Filter.chain_filters(base)
+      extra -> Filter.chain_filters([extra | base])
+    end
+  end
 
   defp extract_all_counter_values(response, counters) do
     case response.row do

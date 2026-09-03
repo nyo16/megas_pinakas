@@ -97,6 +97,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Declared floor (mix.exs `elixir: "~> 1.18"`; googleapis 0.1.0 needs 1.18).
+          - os: ubuntu-latest
+            elixir: "1.18.3"
+            otp: "26.2"
           - os: ubuntu-latest
             elixir: "1.18.3"
             otp: "27.2"
@@ -118,10 +122,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-
 
+      # The emulator is the only thing that exercises the gRPC path (pool
+      # lifecycle, Client.execute success path, streaming, filters). Without it
+      # the suite only runs pure builders.
+      - name: Start BigTable emulator
+        run: |
+          docker compose up -d bigtable-emulator
+          for i in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8086) 2>/dev/null; then
+              echo "emulator ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "emulator did not open port 8086"; docker compose logs bigtable-emulator; exit 1
+
       - run: mix deps.get
       - run: mix deps.compile
       - run: mix compile
-      - run: mix test
+      - run: mix test --include emulator
+
+      - name: Emulator logs on failure
+        if: failure()
+        run: docker compose logs bigtable-emulator
 
   dialyzer:
     name: Dialyzer

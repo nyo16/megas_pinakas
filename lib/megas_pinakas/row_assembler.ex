@@ -6,14 +6,10 @@ defmodule MegasPinakas.RowAssembler do
   be folded into rows by a small state machine, because a single row may span
   many chunks and a single chunk may complete a row.
 
-  Two entry points share that state machine:
-
-    * `reduce_all/1` — eager. Consumes the whole stream and returns
-      `{:ok, [Row.t()]}` or `{:error, {:incomplete_read, reason}}`. Used by
-      `MegasPinakas.read_rows/4`.
-    * `stream_transform/1` — lazy. Emits each row as its `commit_row` chunk
-      arrives, so a caller can process a large scan without materializing it.
-      Used by `MegasPinakas.Streaming`.
+  `reduce_all/1` consumes the whole stream eagerly and returns `{:ok, [Row.t()]}`
+  or `{:error, {:incomplete_read, reason}}`. It is used by
+  `MegasPinakas.read_rows/4`, which `MegasPinakas.Streaming` in turn calls once
+  per batch. `apply_chunk/2` exposes the state machine itself.
 
   ## Chunk protocol
 
@@ -28,6 +24,10 @@ defmodule MegasPinakas.RowAssembler do
     * **A value split across chunks sets `value_size > 0`** on every chunk but
       the last. Each fragment must be concatenated into one cell, not recorded as
       a separate cell.
+    * **Every other chunk is a cell.** There is no bare "commit marker": a chunk
+      with no family, no qualifier and an empty value is a real cell whose
+      column is inherited from the previous chunk (a second version of an
+      empty-valued column, or any version under `strip_value_filter`).
 
   The BigTable emulator exercises none of these: it sets `row_key` on every
   chunk and never splits values. They are covered by unit tests built from
@@ -41,7 +41,7 @@ defmodule MegasPinakas.RowAssembler do
   alias Google.Bigtable.V2.Family
   alias Google.Bigtable.V2.ReadRowsResponse
   alias Google.Bigtable.V2.Row
-  alias MegasPinakas.StreamError
+  alias MegasPinakas.Response
 
   @type state :: %{
           row_key: binary() | nil,
@@ -68,7 +68,8 @@ defmodule MegasPinakas.RowAssembler do
 
   Returns `{:error, {:incomplete_read, reason}}` if the stream fails partway
   through, rather than `{:ok, partial_rows}` — a truncated result the caller
-  cannot distinguish from a complete one.
+  cannot distinguish from a complete one. A gRPC failure is normalized to
+  `{status_atom, message}` via `MegasPinakas.Response.normalize_reason/1`.
   """
   @spec reduce_all(Enumerable.t()) :: {:ok, [Row.t()]} | {:error, term()}
   def reduce_all(stream) do
@@ -88,7 +89,7 @@ defmodule MegasPinakas.RowAssembler do
 
   defp reduce_element({:error, reason}, _acc) do
     Logger.warning("BigTable read_rows stream error: #{inspect(reason)}")
-    {:halt, {:error, {:incomplete_read, reason}}}
+    {:halt, {:error, {:incomplete_read, Response.normalize_reason(reason)}}}
   end
 
   # An unrecognised element means the response shape changed underneath us. Fail
@@ -103,42 +104,6 @@ defmodule MegasPinakas.RowAssembler do
       {:row, row, next_state} -> {[row | rows], next_state}
       {:cont, next_state} -> {rows, next_state}
     end
-  end
-
-  # ==========================================================================
-  # Lazy
-  # ==========================================================================
-
-  @doc """
-  Wraps a chunk stream in a lazy stream of rows.
-
-  Each row is emitted as soon as its `commit_row` chunk arrives, so memory is
-  bounded by the largest single row rather than by the result set.
-
-  Raises `MegasPinakas.StreamError` if the underlying stream fails. A lazy stream
-  has no return value to carry an error tuple, and halting quietly would make
-  `Enum.to_list/1` return partial data indistinguishable from a complete result.
-  """
-  @spec stream_transform(Enumerable.t()) :: Enumerable.t()
-  def stream_transform(stream) do
-    Stream.transform(stream, &new/0, &transform_element/2, & &1)
-  end
-
-  defp transform_element({:ok, %ReadRowsResponse{chunks: chunks}}, state) do
-    {rows, next_state} = Enum.reduce(chunks, {[], state}, &collect_chunk/2)
-    {Enum.reverse(rows), next_state}
-  end
-
-  defp transform_element({:trailers, _trailers}, state), do: {[], state}
-
-  defp transform_element({:error, reason}, state) do
-    raise StreamError, reason: reason, last_key: state.row_key
-  end
-
-  defp transform_element(unexpected, state) do
-    raise StreamError,
-      reason: {:unexpected_read_rows_chunk, unexpected},
-      last_key: state.row_key
   end
 
   # ==========================================================================
@@ -177,19 +142,15 @@ defmodule MegasPinakas.RowAssembler do
   defp accumulate(state, chunk) do
     state = state |> track_family(chunk) |> track_qualifier(chunk)
 
-    cond do
-      # Continuation of a value split across chunks: concatenate, do not add a
-      # second cell.
-      state.partial != nil ->
-        settle(state, %{state.partial | value: state.partial.value <> chunk.value}, chunk)
+    # Continuation of a value split across chunks: concatenate, do not add a
+    # second cell. Anything else is a cell, however sparse the chunk looks.
+    cell =
+      case state.partial do
+        nil -> new_cell(state, chunk)
+        partial -> %{partial | value: partial.value <> chunk.value}
+      end
 
-      # A bare commit marker carries no cell data of its own.
-      marker_chunk?(chunk) ->
-        state
-
-      true ->
-        settle(state, new_cell(state, chunk), chunk)
-    end
+    settle(state, cell, chunk)
   end
 
   # `value_size > 0` means more fragments of this value are still coming.
@@ -211,10 +172,6 @@ defmodule MegasPinakas.RowAssembler do
   end
 
   defp track_qualifier(state, _chunk), do: state
-
-  defp marker_chunk?(chunk) do
-    chunk.family_name == nil and chunk.qualifier == nil and chunk.value in [nil, ""]
-  end
 
   defp new_cell(state, chunk) do
     %{
