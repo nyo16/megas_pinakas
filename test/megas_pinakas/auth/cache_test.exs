@@ -161,13 +161,57 @@ defmodule MegasPinakas.Auth.CacheTest do
     end
   end
 
-  describe "errors" do
-    test "a failing source returns the error and caches nothing" do
+  describe "failures" do
+    test "a failing source returns the error and caches no token" do
       with_counting_source(
         fn counter ->
           assert {:error, :boom} = Cache.fetch_token()
           assert Cache.peek() == :error
+          assert fetch_count(counter) == 1
+        end,
+        result: {:error, :boom}
+      )
+    end
 
+    test "a failure is remembered: N calls within the window cost one source call" do
+      with_counting_source(
+        fn counter ->
+          results = for _ <- 1..50, do: Cache.fetch_token()
+
+          assert Enum.uniq(results) == [{:error, :boom}]
+
+          assert fetch_count(counter) == 1, """
+          Expected the failing token source to run once for 50 calls, got #{fetch_count(counter)}.
+
+          Without a negative cache, a broken credential re-runs the ~1 s token
+          fetch (and logs) on every RPC.
+          """
+        end,
+        result: {:error, :boom}
+      )
+    end
+
+    test "concurrent callers behind a failing refresh share one source call" do
+      with_counting_source(
+        fn counter ->
+          results =
+            1..25
+            |> Enum.map(fn _ -> Task.async(fn -> Cache.fetch_token() end) end)
+            |> Enum.map(&Task.await(&1, 5_000))
+
+          assert Enum.uniq(results) == [{:error, :boom}]
+          assert fetch_count(counter) == 1
+        end,
+        result: {:error, :boom},
+        delay: 100
+      )
+    end
+
+    test "invalidate/1 forgets the failure so the source is retried" do
+      with_counting_source(
+        fn counter ->
+          assert {:error, :boom} = Cache.fetch_token()
+          assert :ok = Cache.invalidate()
           assert {:error, :boom} = Cache.fetch_token()
           assert fetch_count(counter) == 2
         end,
@@ -175,25 +219,58 @@ defmodule MegasPinakas.Auth.CacheTest do
       )
     end
 
-    test "request_opts/0 omits metadata when no token is available" do
-      emulator = Application.get_env(:megas_pinakas, :emulator)
-      env_host = System.get_env("BIGTABLE_EMULATOR_HOST")
-      Application.delete_env(:megas_pinakas, :emulator)
-      System.delete_env("BIGTABLE_EMULATOR_HOST")
+    test "a raising source is contained and its failure is cached" do
+      cache_pid = Process.whereis(Cache)
+      original = Application.get_env(:megas_pinakas, :token_source)
+      counter = :counters.new(1, [])
+
+      Application.put_env(:megas_pinakas, :token_source, fn ->
+        :counters.add(counter, 1, 1)
+        raise ArgumentError, "bad credentials"
+      end)
+
+      Cache.invalidate()
 
       try do
-        with_counting_source(
-          fn _counter ->
-            opts = Auth.request_opts()
-            assert Keyword.has_key?(opts, :timeout)
-            refute Keyword.has_key?(opts, :metadata)
-          end,
-          result: {:error, :boom}
-        )
+        for _ <- 1..10 do
+          assert {:error, {:token_source_error, "bad credentials"}} = Cache.fetch_token()
+        end
+
+        assert :counters.get(counter, 1) == 1
+        assert Process.whereis(Cache) == cache_pid
       after
-        if emulator, do: Application.put_env(:megas_pinakas, :emulator, emulator)
-        if env_host, do: System.put_env("BIGTABLE_EMULATOR_HOST", env_host)
+        if original,
+          do: Application.put_env(:megas_pinakas, :token_source, original),
+          else: Application.delete_env(:megas_pinakas, :token_source)
+
+        Cache.invalidate()
       end
+    end
+
+    test "a stale token plus a remembered failure does not re-run the source" do
+      # A token inside the refresh margin is still in the table when its
+      # refresh fails. The stale token must not keep triggering refreshes that
+      # the negative cache was meant to suppress.
+      with_counting_source(
+        fn counter ->
+          # Fetch 1 caches a token with 30 s left — already inside the 60 s
+          # margin — so fetch 2 refreshes.
+          assert {:ok, "Bearer token-1"} = Cache.fetch_token()
+          assert fetch_count(counter) == 1
+
+          Application.put_env(:megas_pinakas, :token_source, fn ->
+            :counters.add(counter, 1, 1)
+            {:error, :revoked}
+          end)
+
+          assert {:error, :revoked} = Cache.fetch_token()
+          assert fetch_count(counter) == 2
+
+          for _ <- 1..20, do: assert({:error, :revoked} = Cache.fetch_token())
+          assert fetch_count(counter) == 2
+        end,
+        ttl: 30
+      )
     end
   end
 

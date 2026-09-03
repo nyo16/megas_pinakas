@@ -20,22 +20,36 @@ import Config
 # Connection pool settings for production
 config :megas_pinakas, :default_pool_size, 10
 
-# For production, you can also use the modern GrpcConnectionPool.Config format:
+# The Data API pool can also be configured in full GrpcConnectionPool.Config
+# form. `pool.name` is always forced to MegasPinakas.ConnectionPool (that is the
+# name MegasPinakas.Client looks up), so there is no point setting it. Note that
+# compile-time config files cannot call dependency code, so spell the TLS
+# options out (this is what GrpcConnectionPool.Config.default_production_ssl/0
+# returns); `ssl: []` would disable peer verification.
+#
 # config :megas_pinakas, GrpcConnectionPool,
 #   endpoint: [
 #     type: :production,
 #     host: "bigtable.googleapis.com",
 #     port: 443,
-#     ssl: []
+#     ssl: [
+#       verify: :verify_peer,
+#       cacerts: :public_key.cacerts_get(),
+#       depth: 3,
+#       customize_hostname_check: [
+#         match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+#       ]
+#     ]
 #   ],
-#   pool: [
-#     size: 10,
-#     name: MegasPinakas.ConnectionPool
-#   ],
+#   pool: [size: 10],
 #   connection: [
 #     keepalive: 30_000,
 #     ping_interval: 25_000
 #   ]
+#
+# This key configures only the Data API pool. The Admin API pool
+# (MegasPinakas.AdminConnectionPool, bigtableadmin.googleapis.com) is always
+# built from :default_pool_size and the emulator settings.
 
 # Logger configuration
 config :logger, level: :info

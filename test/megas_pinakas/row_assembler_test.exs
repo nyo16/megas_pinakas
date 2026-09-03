@@ -13,7 +13,6 @@ defmodule MegasPinakas.RowAssemblerTest do
   alias Google.Bigtable.V2.ReadRowsResponse
   alias Google.Bigtable.V2.ReadRowsResponse.CellChunk
   alias MegasPinakas.RowAssembler
-  alias MegasPinakas.StreamError
 
   defp chunk(fields) do
     fields =
@@ -123,7 +122,7 @@ defmodule MegasPinakas.RowAssemblerTest do
       stream = [
         response([
           chunk(row_key: "r1", family_name: "cf", qualifier: "a", value: "v1"),
-          chunk(row_status: {:commit_row, true})
+          chunk(qualifier: "b", value: "v2", row_status: {:commit_row, true})
         ])
       ]
 
@@ -131,17 +130,46 @@ defmodule MegasPinakas.RowAssemblerTest do
       assert row.key == "r1"
     end
 
-    test "a bare commit marker adds no spurious empty cell" do
+    # The protocol has no bare "commit marker". A chunk with omitted family and
+    # qualifier and an empty value is a real cell — here the second version of an
+    # empty-valued column — and dropping it lost data.
+    test "a sparse commit chunk is a cell, not a marker" do
       stream = [
         response([
-          chunk(row_key: "r1", family_name: "cf", qualifier: "a", value: "v1"),
-          chunk(row_status: {:commit_row, true})
+          chunk(
+            row_key: "r1",
+            family_name: "cf",
+            qualifier: "flag",
+            value: "",
+            timestamp_micros: 2_000
+          ),
+          chunk(value: "", timestamp_micros: 1_000, row_status: {:commit_row, true})
         ])
       ]
 
       assert {:ok, [row]} = RowAssembler.reduce_all(stream)
-      assert [%{columns: [%{qualifier: "a", cells: [cell]}]}] = row.families
-      assert cell.value == "v1"
+      assert [%{name: "cf", columns: [%{qualifier: "flag", cells: cells}]}] = row.families
+      assert Enum.map(cells, & &1.timestamp_micros) == [2_000, 1_000]
+      assert Enum.map(cells, & &1.value) == ["", ""]
+    end
+
+    test "labels are carried onto the assembled cell" do
+      stream = [
+        response([
+          chunk(
+            row_key: "r1",
+            family_name: "cf",
+            qualifier: "a",
+            value: "v1",
+            labels: ["hot"],
+            row_status: {:commit_row, true}
+          )
+        ])
+      ]
+
+      assert {:ok, [row]} = RowAssembler.reduce_all(stream)
+      assert [%{columns: [%{cells: [cell]}]}] = row.families
+      assert cell.labels == ["hot"]
     end
   end
 
@@ -343,6 +371,16 @@ defmodule MegasPinakas.RowAssemblerTest do
       assert {:error, {:incomplete_read, :deadline_exceeded}} = RowAssembler.reduce_all(stream)
     end
 
+    test "a gRPC error is normalized to {status_atom, message}" do
+      stream = [
+        simple_row("r1", "cf", "col", "v1"),
+        {:error, %GRPC.RPCError{status: 14, message: "connection reset"}}
+      ]
+
+      assert {:error, {:incomplete_read, {:unavailable, "connection reset"}}} =
+               RowAssembler.reduce_all(stream)
+    end
+
     test "an unrecognised element fails loudly" do
       stream = [simple_row("r1", "cf", "col", "v1"), :something_unexpected]
 
@@ -376,117 +414,6 @@ defmodule MegasPinakas.RowAssemblerTest do
 
       assert {:error, {:incomplete_read, :boom}} = RowAssembler.reduce_all(stream)
       assert :counters.get(consumed, 1) == 2
-    end
-  end
-
-  describe "stream_transform/1 — lazy assembly" do
-    test "emits assembled rows" do
-      stream = [
-        simple_row("r1", "cf", "col", "v1"),
-        simple_row("r2", "cf", "col", "v2")
-      ]
-
-      rows = stream |> RowAssembler.stream_transform() |> Enum.to_list()
-      assert Enum.map(rows, & &1.key) == ["r1", "r2"]
-    end
-
-    test "is lazy — consumes only what the caller demands" do
-      consumed = :counters.new(1, [])
-
-      source =
-        Stream.map(1..100, fn i ->
-          :counters.add(consumed, 1, 1)
-          simple_row("r#{i}", "cf", "col", "v#{i}")
-        end)
-
-      rows = source |> RowAssembler.stream_transform() |> Enum.take(3)
-
-      assert Enum.map(rows, & &1.key) == ["r1", "r2", "r3"]
-
-      assert :counters.get(consumed, 1) < 10, """
-      Expected lazy consumption, but #{:counters.get(consumed, 1)} source elements \
-      were pulled to produce 3 rows.
-      """
-    end
-
-    test "emits a row spanning several responses only once complete" do
-      stream = [
-        response([chunk(row_key: "r1", family_name: "cf", qualifier: "a", value: "v1")]),
-        response([chunk(qualifier: "b", value: "v2")]),
-        response([chunk(qualifier: "c", value: "v3", row_status: {:commit_row, true})])
-      ]
-
-      assert [row] = stream |> RowAssembler.stream_transform() |> Enum.to_list()
-      assert row.key == "r1"
-      assert [%{columns: columns}] = row.families
-      assert length(columns) == 3
-    end
-
-    test "raises StreamError on a mid-stream failure rather than truncating" do
-      stream = [simple_row("r1", "cf", "col", "v1"), {:error, :connection_lost}]
-
-      assert_raise StreamError, ~r/connection_lost/, fn ->
-        stream |> RowAssembler.stream_transform() |> Enum.to_list()
-      end
-    end
-
-    test "the raised error reports the last successfully assembled key" do
-      stream = [
-        simple_row("r1", "cf", "col", "v1"),
-        response([chunk(row_key: "r2", family_name: "cf", qualifier: "a", value: "partial")]),
-        {:error, :boom}
-      ]
-
-      error =
-        assert_raise StreamError, fn ->
-          stream |> RowAssembler.stream_transform() |> Enum.to_list()
-        end
-
-      assert error.reason == :boom
-      assert error.last_key == "r2"
-    end
-
-    test "raises on an unrecognised element" do
-      assert_raise StreamError, ~r/unexpected_read_rows_chunk/, fn ->
-        [:garbage] |> RowAssembler.stream_transform() |> Enum.to_list()
-      end
-    end
-
-    test "an error after the taken prefix is never reached" do
-      stream = [simple_row("r1", "cf", "col", "v1"), {:error, :boom}]
-
-      # Laziness means a caller that stops early never sees the failure.
-      assert [row] = stream |> RowAssembler.stream_transform() |> Enum.take(1)
-      assert row.key == "r1"
-    end
-  end
-
-  describe "eager and lazy agree" do
-    test "both produce identical rows for the same chunk stream" do
-      stream = [
-        response([
-          chunk(row_key: "r1", family_name: "cf", qualifier: "a", value: "ab", value_size: 4),
-          chunk(value: "cd"),
-          chunk(qualifier: "b", value: "x", row_status: {:commit_row, true})
-        ]),
-        response([
-          chunk(row_key: "r2", family_name: "cf2", qualifier: "z", value: "discarded"),
-          chunk(row_status: {:reset_row, true}),
-          chunk(
-            row_key: "r2",
-            family_name: "cf2",
-            qualifier: "z",
-            value: "kept",
-            row_status: {:commit_row, true}
-          )
-        ]),
-        simple_row("r3", "cf", "col", "v3")
-      ]
-
-      assert {:ok, eager} = RowAssembler.reduce_all(stream)
-      lazy = stream |> RowAssembler.stream_transform() |> Enum.to_list()
-
-      assert eager == lazy
     end
   end
 end

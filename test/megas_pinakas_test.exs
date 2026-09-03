@@ -25,10 +25,28 @@ defmodule MegasPinakasTest do
     end
 
     test "set_cell/4 creates a SetCell mutation with custom timestamp" do
-      mutation = MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 1_234_567_890)
+      mutation = MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 1_234_567_890_000)
 
       assert %Mutation{mutation: {:set_cell, set_cell}} = mutation
-      assert set_cell.timestamp_micros == 1_234_567_890
+      assert set_cell.timestamp_micros == 1_234_567_890_000
+    end
+
+    test "set_cell/4 accepts a zero timestamp" do
+      assert %Mutation{mutation: {:set_cell, %{timestamp_micros: 0}}} =
+               MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 0)
+    end
+
+    test "set_cell/4 rejects timestamps that are not millisecond-aligned" do
+      # Tables have millisecond granularity; the server would reject this write.
+      assert_raise ArgumentError, ~r/multiple of 1000.*1234567890/, fn ->
+        MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 1_234_567_890)
+      end
+    end
+
+    test "set_cell/4 rejects negative timestamps other than the -1 sentinel" do
+      assert_raise ArgumentError, fn ->
+        MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: -2000)
+      end
     end
 
     test "delete_from_column/2 creates a DeleteFromColumn mutation" do
@@ -115,14 +133,27 @@ defmodule MegasPinakasTest do
       assert range.end_key == {:end_key_open, "user$"}
     end
 
-    test "row_range_prefix/1 handles byte overflow" do
-      # Test with a string ending in 0xFF
+    test "row_range_prefix/1 drops trailing 0xFF bytes and increments the one before" do
       range = MegasPinakas.row_range_prefix(<<97, 255>>)
 
-      assert %RowRange{} = range
       assert range.start_key == {:start_key_closed, <<97, 255>>}
-      # Should increment the previous byte
       assert range.end_key == {:end_key_open, <<98>>}
+    end
+
+    test "row_range_prefix/1 leaves an all-0xFF prefix open-ended" do
+      # There is no key greater than <<255, 255>>; an {:end_key_open, <<>>} bound
+      # would have meant "before every key" and matched nothing.
+      range = MegasPinakas.row_range_prefix(<<255, 255>>)
+
+      assert range.start_key == {:start_key_closed, <<255, 255>>}
+      assert range.end_key == nil
+    end
+
+    test "row_range_prefix/1 with an empty prefix covers the whole table" do
+      range = MegasPinakas.row_range_prefix("")
+
+      assert range.start_key == {:start_key_closed, ""}
+      assert range.end_key == nil
     end
 
     test "row_range_open/2 creates a row range with both keys exclusive" do
@@ -286,6 +317,64 @@ defmodule MegasPinakasTest do
 
       assert MegasPinakas.interleave_filters(filters) ==
                MegasPinakas.Filter.interleave_filters(filters)
+    end
+  end
+
+  # These all raise before Client.execute/2 is reached, so they need no emulator
+  # and must not produce a rescued {:error, _} or an :exception telemetry event.
+  describe "argument validation happens before any RPC" do
+    test "read_rows/4 rejects a non-positive or non-integer :max_rows" do
+      for bad <- [0, -1, 1.5, "10", nil] do
+        assert_raise ArgumentError, ~r/:max_rows must be :infinity or a positive integer/, fn ->
+          MegasPinakas.read_rows("p", "i", "t", max_rows: bad)
+        end
+      end
+    end
+
+    test "read_rows/4 rejects a negative or non-integer :rows_limit" do
+      for bad <- [-1, 2.0, "5"] do
+        assert_raise ArgumentError, ~r/:rows_limit must be a non-negative integer/, fn ->
+          MegasPinakas.read_rows("p", "i", "t", rows_limit: bad)
+        end
+      end
+    end
+
+    test "mutate_rows/5 rejects an entry without mutations" do
+      assert_raise ArgumentError, ~r/binary :row_key and a list of :mutations/, fn ->
+        MegasPinakas.mutate_rows("p", "i", "t", [%{row_key: "k"}])
+      end
+    end
+
+    test "mutate_rows/5 rejects an entry with a non-binary row key" do
+      assert_raise ArgumentError, fn ->
+        MegasPinakas.mutate_rows("p", "i", "t", [%{row_key: :k, mutations: []}])
+      end
+    end
+
+    # Captured funs keep the compiler's type checker from flagging these calls as
+    # statically wrong — being wrong is the point.
+    test "mutate_rows/5 rejects entries that are neither maps nor Rows" do
+      assert_raise ArgumentError, ~r/must be a %MegasPinakas.Row{} or a map/, fn ->
+        MegasPinakas.mutate_rows("p", "i", "t", [{"k", []}])
+      end
+
+      mutate_rows = &MegasPinakas.mutate_rows/4
+      assert_raise FunctionClauseError, fn -> mutate_rows.("p", "i", "t", :not_a_list) end
+    end
+
+    test "check_and_mutate_row/8 requires a binary row key" do
+      check_and_mutate_row = &MegasPinakas.check_and_mutate_row/7
+
+      assert_raise FunctionClauseError, fn ->
+        check_and_mutate_row.("p", "i", "t", nil, nil, [], [])
+      end
+    end
+
+    test "read_modify_write_row/6 requires a binary row key and a list of rules" do
+      read_modify_write_row = &MegasPinakas.read_modify_write_row/5
+
+      assert_raise FunctionClauseError, fn -> read_modify_write_row.("p", "i", "t", 123, []) end
+      assert_raise FunctionClauseError, fn -> read_modify_write_row.("p", "i", "t", "k", nil) end
     end
   end
 

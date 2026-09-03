@@ -3,9 +3,13 @@ defmodule MegasPinakas.ClientTest do
 
   alias MegasPinakas.Client
 
-  describe "default_pool/0" do
-    test "returns the default pool name" do
+  describe "pool names" do
+    test "default_pool/0 is the Data API pool" do
       assert Client.default_pool() == MegasPinakas.ConnectionPool
+    end
+
+    test "admin_pool/0 is the Admin API pool" do
+      assert Client.admin_pool() == MegasPinakas.AdminConnectionPool
     end
   end
 
@@ -27,31 +31,40 @@ defmodule MegasPinakas.ClientTest do
 
       refute_received :operation_ran
     end
-  end
 
-  describe "execute!/2" do
-    test "raises when pool is not started" do
-      operation = fn _channel -> :ok end
+    test "a pool error is a completed request: :stop with result {:error, :pool_error}" do
+      handler_id = {__MODULE__, System.unique_integer([:positive])}
+      test_pid = self()
 
-      assert_raise RuntimeError,
-                   "BigTable operation failed: {:pool_error, :not_connected}",
-                   fn ->
-                     Client.execute!(operation, pool: :nonexistent_pool)
-                   end
+      :telemetry.attach_many(
+        handler_id,
+        [[:megas_pinakas, :request, :stop], [:megas_pinakas, :request, :exception]],
+        fn [_, _, event], _measurements, metadata, _ -> send(test_pid, {event, metadata}) end,
+        nil
+      )
+
+      try do
+        Client.execute(fn _channel -> :ok end, pool: :nonexistent_pool)
+
+        assert_received {:stop, %{pool: :nonexistent_pool, result: {:error, :pool_error}}}
+        refute_received {:exception, _}
+      after
+        :telemetry.detach(handler_id)
+      end
     end
   end
 
-  describe "module exports" do
-    test "exports all expected functions" do
-      functions = Client.__info__(:functions)
+  describe "execute!/2" do
+    test "raises MegasPinakas.Error carrying the reason" do
+      operation = fn _channel -> :ok end
 
-      assert {:execute, 1} in functions
-      assert {:execute, 2} in functions
-      assert {:execute!, 1} in functions
-      assert {:execute!, 2} in functions
-      assert {:status, 0} in functions
-      assert {:status, 1} in functions
-      assert {:default_pool, 0} in functions
+      error =
+        assert_raise MegasPinakas.Error, fn ->
+          Client.execute!(operation, pool: :nonexistent_pool)
+        end
+
+      assert error.reason == {:pool_error, :not_connected}
+      assert Exception.message(error) =~ "{:pool_error, :not_connected}"
     end
   end
 end

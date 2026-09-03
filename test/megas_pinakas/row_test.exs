@@ -324,39 +324,25 @@ defmodule MegasPinakas.RowTest do
     end
   end
 
-  describe "module exports" do
-    test "exports all expected functions" do
-      functions = Row.__info__(:functions)
+  describe "put/5 with an unsupported value" do
+    test "raises ArgumentError naming the value and the escape hatch" do
+      assert_raise ArgumentError, ~r/cannot infer a cell type for :pending.*put_term\/5/, fn ->
+        Row.new("key") |> Row.put("cf", "col", :pending)
+      end
+    end
 
-      assert {:new, 1} in functions
-      assert {:put, 4} in functions
-      assert {:put, 5} in functions
-      assert {:put_binary, 4} in functions
-      assert {:put_binary, 5} in functions
-      assert {:put_string, 4} in functions
-      assert {:put_string, 5} in functions
-      assert {:put_json, 4} in functions
-      assert {:put_json, 5} in functions
-      assert {:put_integer, 4} in functions
-      assert {:put_integer, 5} in functions
-      assert {:put_float, 4} in functions
-      assert {:put_float, 5} in functions
-      assert {:put_boolean, 4} in functions
-      assert {:put_boolean, 5} in functions
-      assert {:put_datetime, 4} in functions
-      assert {:put_datetime, 5} in functions
-      assert {:put_term, 4} in functions
-      assert {:put_term, 5} in functions
-      assert {:delete_cell, 3} in functions
-      assert {:delete_family, 2} in functions
-      assert {:delete_row, 1} in functions
-      assert {:write, 4} in functions
-      assert {:write, 5} in functions
-      assert {:to_mutations, 1} in functions
-      assert {:to_entry, 1} in functions
-      assert {:row_key, 1} in functions
-      assert {:mutation_count, 1} in functions
-      assert {:empty?, 1} in functions
+    test "rejects nil rather than silently writing an empty cell" do
+      assert_raise ArgumentError, ~r/cannot infer a cell type for nil/, fn ->
+        Row.new("key") |> Row.put("cf", "col", nil)
+      end
+    end
+
+    test "tuples must go through put_term/5" do
+      assert_raise ArgumentError, fn -> Row.new("key") |> Row.put("cf", "col", {:a, 1}) end
+
+      row = Row.new("key") |> Row.put_term("cf", "col", {:a, 1})
+      [%Mutation{mutation: {:set_cell, set_cell}}] = Row.to_mutations(row)
+      assert Types.decode(:term, set_cell.value) == {:ok, {:a, 1}}
     end
   end
 end

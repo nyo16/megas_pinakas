@@ -5,15 +5,28 @@ defmodule MegasPinakas.TimeSeries do
   Uses reverse timestamp row keys for efficient recent-first queries.
   Row key design: `<metric_id>#<reverse_timestamp>`
 
-  Reverse timestamp = `max_timestamp - actual_timestamp` where max_timestamp
-  is a large constant (e.g., 9999999999999999), ensuring recent data sorts first.
+  Reverse timestamp = `max_timestamp - actual_timestamp` in microseconds, where
+  `max_timestamp` is `9_999_999_999_999_999` (year 2286), zero-padded to 19
+  digits so keys sort lexicographically with the most recent point first.
+
+  ## Value encoding
+
+  Each point stores its value in the `value` column and the value's type in a
+  sibling `value_type` column holding one of `"i"` (integer), `"f"` (float),
+  `"s"` (string) or `"j"` (JSON: maps, lists, booleans). Queries decode the
+  value according to that tag, so an integer written comes back as an integer,
+  never as a float that happens to share the same byte width. A point whose tag
+  is missing or unrecognised is returned with its raw binary value.
+
+  `nil` cannot be stored as a value; `write_point/6` and `write_points/5`
+  return `{:error, :nil_value}` rather than writing a point with no value.
 
   ## Examples
 
       # Write a data point
       {:ok, _} = MegasPinakas.TimeSeries.write_point(
         project, instance, "metrics", "cpu:server1",
-        %{value: 0.85, host: "srv1"}
+        %{value: 0.85, tags: %{host: "srv1"}}
       )
 
       # Query recent points
@@ -22,13 +35,14 @@ defmodule MegasPinakas.TimeSeries do
         limit: 100
       )
 
-      # Query time range
+      # Query the half-open time range [start, end)
       {:ok, points} = MegasPinakas.TimeSeries.query_range(
         project, instance, "metrics", "cpu:server1",
         ~U[2024-01-01 00:00:00Z], ~U[2024-01-02 00:00:00Z]
       )
   """
 
+  alias Google.Bigtable.V2.RowRange
   alias MegasPinakas
   alias MegasPinakas.Row
   alias MegasPinakas.RowKey
@@ -39,6 +53,7 @@ defmodule MegasPinakas.TimeSeries do
 
   @default_family "data"
   @value_qualifier "value"
+  @type_qualifier "value_type"
   @timestamp_qualifier "ts"
   @tags_qualifier "tags"
 
@@ -49,11 +64,18 @@ defmodule MegasPinakas.TimeSeries do
   @doc """
   Writes a single data point.
 
+  `data` is a map with a required `:value` (integer, float, string, boolean,
+  map or list) and an optional `:tags` map.
+
+  Returns `{:error, :nil_value}` when `:value` is missing or `nil`, and
+  `{:error, {:unsupported_value, value}}` for any other term that cannot be
+  encoded, in both cases without issuing a request.
+
   ## Options
 
     * `:timestamp` - DateTime for the point (default: now)
     * `:family` - Column family (default: "data")
-    * `:tags` - Map of tags/labels for the point
+    * `:app_profile_id` - App profile to use
 
   ## Examples
 
@@ -68,34 +90,18 @@ defmodule MegasPinakas.TimeSeries do
     timestamp = Keyword.get(opts, :timestamp, DateTime.utc_now())
     family = Keyword.get(opts, :family, @default_family)
 
-    row_key = time_series_row_key(metric_id, timestamp)
-    value = Map.get(data, :value)
-    tags = Map.get(data, :tags, %{})
-
-    row =
-      Row.new(row_key)
-      |> Row.put_datetime(family, @timestamp_qualifier, timestamp)
-
-    row =
-      cond do
-        is_float(value) -> Row.put_float(row, family, @value_qualifier, value)
-        is_integer(value) -> Row.put_integer(row, family, @value_qualifier, value)
-        is_binary(value) -> Row.put_string(row, family, @value_qualifier, value)
-        true -> Row.put_json(row, family, @value_qualifier, value)
-      end
-
-    row =
-      if map_size(tags) > 0 do
-        Row.put_json(row, family, @tags_qualifier, tags)
-      else
-        row
-      end
-
-    Row.write(row, project, instance, table, opts)
+    with {:ok, row} <- build_row(metric_id, timestamp, data, family) do
+      Row.write(row, project, instance, table, opts)
+    end
   end
 
   @doc """
   Writes multiple data points in a batch.
+
+  Each point is a map with `:metric_id`, `:value` and optional `:timestamp` and
+  `:tags`, encoded as described in `write_point/6`. If any point has a `nil` or
+  unsupported value the whole call returns that point's error and nothing is
+  written.
 
   Returns one result per point, ordered to match `points`. `{:ok, results}` means
   the RPC succeeded, **not** that every point was written — check
@@ -120,37 +126,19 @@ defmodule MegasPinakas.TimeSeries do
     family = Keyword.get(opts, :family, @default_family)
 
     entries =
-      Enum.map(points, fn point ->
+      Enum.reduce_while(points, {:ok, []}, fn point, {:ok, acc} ->
         metric_id = Map.fetch!(point, :metric_id)
         timestamp = Map.get(point, :timestamp, DateTime.utc_now())
-        value = Map.get(point, :value)
-        tags = Map.get(point, :tags, %{})
 
-        row_key = time_series_row_key(metric_id, timestamp)
-
-        row =
-          Row.new(row_key)
-          |> Row.put_datetime(family, @timestamp_qualifier, timestamp)
-
-        row =
-          cond do
-            is_float(value) -> Row.put_float(row, family, @value_qualifier, value)
-            is_integer(value) -> Row.put_integer(row, family, @value_qualifier, value)
-            is_binary(value) -> Row.put_string(row, family, @value_qualifier, value)
-            true -> Row.put_json(row, family, @value_qualifier, value)
-          end
-
-        row =
-          if map_size(tags) > 0 do
-            Row.put_json(row, family, @tags_qualifier, tags)
-          else
-            row
-          end
-
-        Row.to_entry(row)
+        case build_row(metric_id, timestamp, point, family) do
+          {:ok, row} -> {:cont, {:ok, [Row.to_entry(row) | acc]}}
+          {:error, _} = error -> {:halt, error}
+        end
       end)
 
-    MegasPinakas.mutate_rows(project, instance, table, entries, opts)
+    with {:ok, reversed} <- entries do
+      MegasPinakas.mutate_rows(project, instance, table, Enum.reverse(reversed), opts)
+    end
   end
 
   # ============================================================================
@@ -160,10 +148,14 @@ defmodule MegasPinakas.TimeSeries do
   @doc """
   Queries the most recent data points for a metric.
 
+  Points are returned most recent first. Each point is a map with `:row_key`,
+  `:timestamp`, `:value` (decoded per its type tag) and `:tags`.
+
   ## Options
 
     * `:limit` - Maximum number of points to return (default: 100)
     * `:family` - Column family (default: "data")
+    * `:app_profile_id` - App profile to use
 
   ## Examples
 
@@ -176,33 +168,28 @@ defmodule MegasPinakas.TimeSeries do
           {:ok, [map()]} | {:error, term()}
   def query_recent(project, instance, table, metric_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 100)
-    family = Keyword.get(opts, :family, @default_family)
 
     # Use prefix range for this metric
     row_range = MegasPinakas.row_range_prefix("#{metric_id}#")
 
-    read_opts =
-      opts
-      |> Keyword.put(:rows, MegasPinakas.row_set_from_ranges([row_range]))
-      |> Keyword.put(:rows_limit, limit)
-
-    case MegasPinakas.read_rows(project, instance, table, read_opts) do
-      {:ok, rows} ->
-        points = Enum.map(rows, fn row -> parse_point(row, family) end)
-        {:ok, points}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    read_points(project, instance, table, row_range, limit, opts)
   end
 
   @doc """
-  Queries data points within a time range.
+  Queries data points within the half-open time range `[start_time, end_time)`.
+
+  A point stamped exactly `start_time` is included; one stamped exactly
+  `end_time` is not, so adjacent ranges partition a series without overlap.
+  Points are returned most recent first. An empty range (`start_time ==
+  end_time`) returns `{:ok, []}` without a request; an inverted range
+  (`start_time > end_time`) raises `ArgumentError`, because BigTable rejects a
+  row range whose start is not below its end.
 
   ## Options
 
+    * `:limit` - Maximum number of points to return (default: unlimited)
     * `:family` - Column family (default: "data")
-    * `:limit` - Maximum number of points
+    * `:app_profile_id` - App profile to use
 
   ## Examples
 
@@ -222,25 +209,28 @@ defmodule MegasPinakas.TimeSeries do
         ) ::
           {:ok, [map()]} | {:error, term()}
   def query_range(project, instance, table, metric_id, start_time, end_time, opts \\ []) do
-    family = Keyword.get(opts, :family, @default_family)
+    # BigTable answers start_key >= end_key with INVALID_ARGUMENT (the emulator
+    # silently returns nothing), so settle both degenerate cases client-side.
+    case DateTime.compare(start_time, end_time) do
+      :eq ->
+        {:ok, []}
 
-    # For reverse timestamps, end_time becomes start_key and start_time becomes end_key
-    start_key = "#{metric_id}##{reverse_timestamp(end_time)}"
-    end_key = "#{metric_id}##{reverse_timestamp(start_time)}"
+      :gt ->
+        raise ArgumentError,
+              "query_range/7 start_time #{inspect(start_time)} is after end_time #{inspect(end_time)}"
 
-    row_range = MegasPinakas.row_range(start_key, end_key)
+      :lt ->
+        limit = Keyword.get(opts, :limit, 0)
 
-    read_opts =
-      opts
-      |> Keyword.put(:rows, MegasPinakas.row_set_from_ranges([row_range]))
+        # Reverse timestamps flip the order: the later `end_time` becomes the
+        # smaller key. Excluding it (open start) and including `start_time`
+        # (closed end) yields [start_time, end_time) in wall-clock terms.
+        row_range = %RowRange{
+          start_key: {:start_key_open, time_series_row_key(metric_id, end_time)},
+          end_key: {:end_key_closed, time_series_row_key(metric_id, start_time)}
+        }
 
-    case MegasPinakas.read_rows(project, instance, table, read_opts) do
-      {:ok, rows} ->
-        points = Enum.map(rows, fn row -> parse_point(row, family) end)
-        {:ok, points}
-
-      {:error, reason} ->
-        {:error, reason}
+        read_points(project, instance, table, row_range, limit, opts)
     end
   end
 
@@ -267,7 +257,7 @@ defmodule MegasPinakas.TimeSeries do
   ## Examples
 
       MegasPinakas.TimeSeries.reverse_timestamp(~U[2024-01-15 10:00:00Z])
-      # => "9998290376400000000"
+      # => "0008294687199999999"
   """
   @spec reverse_timestamp(DateTime.t()) :: String.t()
   def reverse_timestamp(%DateTime{} = timestamp) do
@@ -282,7 +272,7 @@ defmodule MegasPinakas.TimeSeries do
 
   ## Examples
 
-      {:ok, dt} = MegasPinakas.TimeSeries.from_reverse_timestamp("9998290376400000000")
+      {:ok, dt} = MegasPinakas.TimeSeries.from_reverse_timestamp("0008294687199999999")
   """
   @spec from_reverse_timestamp(String.t()) :: {:ok, DateTime.t()} | {:error, term()}
   def from_reverse_timestamp(reverse_str) do
@@ -301,8 +291,8 @@ defmodule MegasPinakas.TimeSeries do
 
   ## Examples
 
-      {:ok, %{metric_id: "cpu:server1", timestamp: ~U[...]}} =
-        MegasPinakas.TimeSeries.parse_row_key("cpu:server1#9998290376400000000")
+      {:ok, %{metric_id: "cpu:server1", timestamp: ~U[2024-01-15 10:00:00.000000Z]}} =
+        MegasPinakas.TimeSeries.parse_row_key("cpu:server1#0008294687199999999")
   """
   @spec parse_row_key(String.t()) :: {:ok, map()} | {:error, term()}
   def parse_row_key(row_key) do
@@ -321,9 +311,57 @@ defmodule MegasPinakas.TimeSeries do
   # Private Helpers
   # ============================================================================
 
-  defp parse_point(row, family) do
-    row_key = MegasPinakas.row_key(row)
+  defp build_row(metric_id, %DateTime{} = timestamp, data, family) do
+    with {:ok, {tag, bytes}} <- encode_value(Map.get(data, :value)) do
+      row =
+        metric_id
+        |> time_series_row_key(timestamp)
+        |> Row.new()
+        |> Row.put_datetime(family, @timestamp_qualifier, timestamp)
+        |> Row.put_binary(family, @value_qualifier, bytes)
+        |> Row.put_string(family, @type_qualifier, tag)
 
+      case Map.get(data, :tags, %{}) do
+        tags when map_size(tags) > 0 -> {:ok, Row.put_json(row, family, @tags_qualifier, tags)}
+        _ -> {:ok, row}
+      end
+    end
+  end
+
+  defp encode_value(nil), do: {:error, :nil_value}
+  defp encode_value(v) when is_integer(v), do: {:ok, {"i", Types.encode(:integer, v)}}
+  defp encode_value(v) when is_float(v), do: {:ok, {"f", Types.encode(:float, v)}}
+  defp encode_value(v) when is_binary(v), do: {:ok, {"s", v}}
+  # Booleans, maps and lists go through Jason directly: `Types.encode(:json)`
+  # only accepts maps/lists and raises on unencodable terms, but the contract
+  # here is an error tuple, never a raise.
+  defp encode_value(v) when is_boolean(v) or is_map(v) or is_list(v) do
+    case Jason.encode(v) do
+      {:ok, json} -> {:ok, {"j", json}}
+      {:error, _} -> {:error, {:unsupported_value, v}}
+    end
+  end
+
+  defp encode_value(v), do: {:error, {:unsupported_value, v}}
+
+  defp read_points(project, instance, table, row_range, limit, opts) do
+    family = Keyword.get(opts, :family, @default_family)
+
+    # Only :app_profile_id is forwarded. A caller filter could drop the
+    # value_type/ts columns and silently degrade decoding.
+    read_opts =
+      opts
+      |> Keyword.take([:app_profile_id])
+      |> Keyword.put(:rows, MegasPinakas.row_set_from_ranges([row_range]))
+      |> Keyword.put(:rows_limit, limit)
+
+    case MegasPinakas.read_rows(project, instance, table, read_opts) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &parse_point(&1, family))}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp parse_point(row, family) do
     timestamp =
       case MegasPinakas.get_cell(row, family, @timestamp_qualifier) do
         nil -> nil
@@ -333,7 +371,7 @@ defmodule MegasPinakas.TimeSeries do
     value =
       case MegasPinakas.get_cell(row, family, @value_qualifier) do
         nil -> nil
-        data -> decode_value(data)
+        data -> decode_value(data, MegasPinakas.get_cell(row, family, @type_qualifier))
       end
 
     tags =
@@ -343,7 +381,7 @@ defmodule MegasPinakas.TimeSeries do
       end
 
     %{
-      row_key: row_key,
+      row_key: MegasPinakas.row_key(row),
       timestamp: timestamp,
       value: value,
       tags: tags
@@ -357,17 +395,18 @@ defmodule MegasPinakas.TimeSeries do
     end
   end
 
-  defp decode_value(data) do
-    # Try different decodings
-    case Types.decode(:float, data) do
-      {:ok, v} ->
-        v
+  # Decoded per the stored type tag; a missing or unknown tag, or bytes that do
+  # not decode as tagged, fall back to the raw binary rather than a guess.
+  defp decode_value(data, "i"), do: decode_or_raw(:integer, data)
+  defp decode_value(data, "f"), do: decode_or_raw(:float, data)
+  defp decode_value(data, "s"), do: data
+  defp decode_value(data, "j"), do: decode_or_raw(:json, data)
+  defp decode_value(data, _tag), do: data
 
-      {:error, _} ->
-        case Types.decode(:integer, data) do
-          {:ok, v} -> v
-          {:error, _} -> data
-        end
+  defp decode_or_raw(type, data) do
+    case Types.decode(type, data) do
+      {:ok, v} -> v
+      {:error, _} -> data
     end
   end
 

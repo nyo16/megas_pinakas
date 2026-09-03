@@ -11,6 +11,7 @@ defmodule MegasPinakas.Test.Emulator do
   """
 
   alias MegasPinakas.Admin
+  alias MegasPinakas.Client
 
   @project "test-project"
   @instance "test-instance"
@@ -75,52 +76,24 @@ defmodule MegasPinakas.Test.Emulator do
   end
 
   @doc """
-  Blocks until the connection pool reports `:healthy`.
+  Blocks until both the Data API and Admin API pools report ready.
 
-  The pool connects asynchronously after the application starts, so the first
-  RPC in a run would otherwise race it and fail with `{:pool_error,
-  :not_connected}`.
+  The pools connect asynchronously after the application starts, so the first
+  RPC in a run would otherwise race them and fail with `{:pool_error,
+  :not_connected}`. Raises if either pool is not ready within `timeout` ms.
   """
   def await_pool!(timeout \\ 10_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_await_pool(deadline)
-  end
+    for pool <- [Client.default_pool(), Client.admin_pool()] do
+      case GrpcConnectionPool.await_ready(pool, timeout) do
+        :ok ->
+          :ok
 
-  defp do_await_pool(deadline) do
-    case MegasPinakas.Client.status() do
-      %{status: :healthy} ->
-        :ok
-
-      status ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          raise "BigTable connection pool never became healthy: #{inspect(status)}"
-        end
-
-        Process.sleep(100)
-        do_await_pool(deadline)
+        {:error, :timeout} ->
+          raise "#{inspect(pool)} never became ready within #{timeout}ms: " <>
+                  inspect(GrpcConnectionPool.status(pool))
+      end
     end
-  end
 
-  @doc """
-  Returns true when the configured emulator is accepting connections.
-
-  Used to fail tagged tests with a clear message instead of an opaque gRPC
-  error when the emulator was never started.
-  """
-  def running? do
-    case MegasPinakas.Config.emulator_endpoint() do
-      nil ->
-        false
-
-      {host, port} ->
-        case :gen_tcp.connect(String.to_charlist(host), port, [:binary, active: false], 500) do
-          {:ok, socket} ->
-            :gen_tcp.close(socket)
-            true
-
-          {:error, _} ->
-            false
-        end
-    end
+    :ok
   end
 end

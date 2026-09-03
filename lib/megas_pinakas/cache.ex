@@ -2,14 +2,33 @@ defmodule MegasPinakas.Cache do
   @moduledoc """
   Simple key-value cache backed by BigTable.
 
-  Provides basic cache operations with optional TTL support via GC rules.
-  Values are automatically serialized as JSON for complex types.
+  Any Elixir term can be cached — maps, lists, strings, integers, `nil`. Each
+  entry is stored as a single cell holding an Erlang-term envelope of the value
+  and its optional expiry, so a value roundtrips exactly as it was written
+  (atom keys stay atoms, integers stay integers).
+
+  ## Expiry
+
+  `:ttl` (seconds) is enforced **client-side**: `get/5`, `get_many/5`,
+  `exists?/5` and `get_or_put/6` treat an entry whose expiry has passed as
+  absent. Expired cells are not deleted by a read; they remain in the table until
+  overwritten or garbage-collected. To reclaim storage, configure a
+  `MegasPinakas.Admin.max_age_gc_rule/1` on the cache family that is at least as
+  long as the longest TTL you use — the GC rule is storage reclamation only and
+  is not what makes an entry expire.
+
+  Because every entry is a self-describing term envelope, values written by
+  `MegasPinakas.Types.write_json/8` or other raw writers are not readable through
+  this module. For atomic numeric counters use `MegasPinakas.Counter`.
 
   ## Examples
 
       # Basic get/put
       {:ok, _} = MegasPinakas.Cache.put(project, instance, "cache", "user:123", %{name: "John"})
-      {:ok, data} = MegasPinakas.Cache.get(project, instance, "cache", "user:123")
+      {:ok, %{name: "John"}} = MegasPinakas.Cache.get(project, instance, "cache", "user:123")
+
+      # Expire after five minutes
+      {:ok, _} = MegasPinakas.Cache.put(project, instance, "cache", "session:abc", token, ttl: 300)
 
       # Get or compute
       {:ok, value} = MegasPinakas.Cache.get_or_put(project, instance, "cache", "user:123", fn ->
@@ -27,6 +46,7 @@ defmodule MegasPinakas.Cache do
 
   alias MegasPinakas
   alias MegasPinakas.Batch
+  alias MegasPinakas.Filter
   alias MegasPinakas.Row
   alias MegasPinakas.Types
 
@@ -40,10 +60,13 @@ defmodule MegasPinakas.Cache do
   @doc """
   Gets a cached value by key.
 
+  Returns `{:ok, nil}` when the key is absent **or** its TTL has elapsed.
+
   ## Options
 
     * `:family` - Column family (default: "cache")
     * `:qualifier` - Column qualifier (default: "value")
+    * `:app_profile_id` - App profile to use for the request
 
   ## Examples
 
@@ -52,31 +75,41 @@ defmodule MegasPinakas.Cache do
   @spec get(String.t(), String.t(), String.t(), String.t(), keyword()) ::
           {:ok, term() | nil} | {:error, term()}
   def get(project, instance, table, key, opts \\ []) do
-    family = Keyword.get(opts, :family, @default_family)
-    qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
-
-    Types.read_json(project, instance, table, key, family, qualifier, opts)
+    case lookup(project, instance, table, key, opts) do
+      {:hit, value} -> {:ok, value}
+      :miss -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @doc """
   Stores a value in the cache.
 
+  Any term is accepted, including `nil`. A `nil` value is a real entry: `get/5`
+  returns `{:ok, nil}` for it, exactly as for a missing key, but `exists?/5`
+  returns `{:ok, true}`.
+
   ## Options
 
+    * `:ttl` - Seconds until the entry expires (positive integer). Omit for no
+      expiry. Expiry is evaluated at whole-second granularity, so the effective
+      lifetime is within `(ttl - 1, ttl]` seconds.
     * `:family` - Column family (default: "cache")
     * `:qualifier` - Column qualifier (default: "value")
+    * `:app_profile_id` - App profile to use for the request
 
   ## Examples
 
       {:ok, _} = MegasPinakas.Cache.put(project, instance, "cache", "user:123", %{name: "John"})
+      {:ok, _} = MegasPinakas.Cache.put(project, instance, "cache", "otp:123", 493_201, ttl: 60)
   """
   @spec put(String.t(), String.t(), String.t(), String.t(), term(), keyword()) ::
           {:ok, term()} | {:error, term()}
   def put(project, instance, table, key, value, opts \\ []) do
-    family = Keyword.get(opts, :family, @default_family)
-    qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
+    {family, qualifier} = column(opts)
+    entry = envelope(value, opts)
 
-    Types.write_json(project, instance, table, key, family, qualifier, value, opts)
+    Types.write_term(project, instance, table, key, family, qualifier, entry, opts)
   end
 
   @doc """
@@ -89,42 +122,42 @@ defmodule MegasPinakas.Cache do
   @spec delete(String.t(), String.t(), String.t(), String.t(), keyword()) ::
           {:ok, term()} | {:error, term()}
   def delete(project, instance, table, key, opts \\ []) do
-    family = Keyword.get(opts, :family, @default_family)
-    qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
+    {family, qualifier} = column(opts)
 
     mutations = [MegasPinakas.delete_from_column(family, qualifier)]
     MegasPinakas.mutate_row(project, instance, table, key, mutations, opts)
   end
 
   @doc """
-  Gets a value, computing and storing it if not present.
+  Gets a value, computing and storing it if not present or expired.
 
-  ## Options
+  A stored `nil` is a hit: `default_fn` is not called and `{:ok, nil}` is
+  returned, so negative results can be cached.
 
-    * `:family` - Column family (default: "cache")
-    * `:qualifier` - Column qualifier (default: "value")
+  Accepts the same options as `put/6`, so `:ttl` applies to the value stored on
+  a miss.
 
   ## Examples
 
       {:ok, value} = MegasPinakas.Cache.get_or_put(project, instance, "cache", "key", fn ->
         expensive_computation()
-      end)
+      end, ttl: 600)
   """
   @spec get_or_put(String.t(), String.t(), String.t(), String.t(), (-> term()), keyword()) ::
           {:ok, term()} | {:error, term()}
   def get_or_put(project, instance, table, key, default_fn, opts \\ [])
       when is_function(default_fn, 0) do
-    case get(project, instance, table, key, opts) do
-      {:ok, nil} ->
+    case lookup(project, instance, table, key, opts) do
+      {:hit, value} ->
+        {:ok, value}
+
+      :miss ->
         value = default_fn.()
 
         case put(project, instance, table, key, value, opts) do
           {:ok, _} -> {:ok, value}
           {:error, reason} -> {:error, reason}
         end
-
-      {:ok, value} ->
-        {:ok, value}
 
       {:error, reason} ->
         {:error, reason}
@@ -138,7 +171,14 @@ defmodule MegasPinakas.Cache do
   @doc """
   Gets multiple values by keys.
 
-  Returns a map of key => value pairs. Keys not found will have `nil` values.
+  Returns a map of key => value pairs. Keys that are absent or expired map to
+  `nil`.
+
+  ## Options
+
+    * `:family` - Column family (default: "cache")
+    * `:qualifier` - Column qualifier (default: "value")
+    * `:app_profile_id` - App profile to use for the request
 
   ## Examples
 
@@ -148,37 +188,23 @@ defmodule MegasPinakas.Cache do
   @spec get_many(String.t(), String.t(), String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}
   def get_many(project, instance, table, keys, opts \\ []) when is_list(keys) do
-    family = Keyword.get(opts, :family, @default_family)
-    qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
+    {family, qualifier} = column(opts)
 
-    row_set = MegasPinakas.row_set(keys)
+    read_opts =
+      family
+      |> read_opts(qualifier, opts)
+      |> Keyword.put(:rows, MegasPinakas.row_set(keys))
 
-    case MegasPinakas.read_rows(project, instance, table, rows: row_set) do
-      {:ok, rows} ->
-        results =
-          rows
-          |> Enum.map(fn row ->
-            key = MegasPinakas.row_key(row)
-            raw_value = MegasPinakas.get_cell(row, family, qualifier)
-            {key, decode_json_value(raw_value)}
-          end)
-          |> Map.new()
-
-        # Add missing keys with nil values
-        all_results =
-          Enum.reduce(keys, results, fn key, acc ->
-            Map.put_new(acc, key, nil)
-          end)
-
-        {:ok, all_results}
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, rows} <- MegasPinakas.read_rows(project, instance, table, read_opts),
+         {:ok, found} <- decode_rows(rows, family, qualifier) do
+      {:ok, Map.new(keys, fn key -> {key, Map.get(found, key)} end)}
     end
   end
 
   @doc """
   Stores multiple values.
+
+  Accepts the same options as `put/6`; `:ttl` applies to every entry.
 
   ## Examples
 
@@ -190,15 +216,11 @@ defmodule MegasPinakas.Cache do
   @spec put_many(String.t(), String.t(), String.t(), [{String.t(), term()}], keyword()) ::
           {:ok, term()} | {:error, term()}
   def put_many(project, instance, table, entries, opts \\ []) when is_list(entries) do
-    family = Keyword.get(opts, :family, @default_family)
-    qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
+    {family, qualifier} = column(opts)
 
     batch =
       Enum.reduce(entries, Batch.new(), fn {key, value}, batch ->
-        row =
-          Row.new(key)
-          |> Row.put_json(family, qualifier, value)
-
+        row = Row.put_term(Row.new(key), family, qualifier, envelope(value, opts))
         Batch.add(batch, row)
       end)
 
@@ -224,8 +246,7 @@ defmodule MegasPinakas.Cache do
   @spec delete_many(String.t(), String.t(), String.t(), [String.t()], keyword()) ::
           {:ok, [Google.Bigtable.V2.MutateRowsResponse.Entry.t()]} | {:error, term()}
   def delete_many(project, instance, table, keys, opts \\ []) when is_list(keys) do
-    family = Keyword.get(opts, :family, @default_family)
-    qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
+    {family, qualifier} = column(opts)
 
     entries =
       Enum.map(keys, fn key ->
@@ -243,64 +264,22 @@ defmodule MegasPinakas.Cache do
   # ============================================================================
 
   @doc """
-  Checks if a key exists in the cache.
+  Checks whether a key holds an unexpired entry.
+
+  Unlike `get/5`, a stored `nil` counts as present. Transport and decode errors
+  are returned, not folded into `false`.
 
   ## Examples
 
-      exists? = MegasPinakas.Cache.exists?(project, instance, "cache", "key")
+      {:ok, true} = MegasPinakas.Cache.exists?(project, instance, "cache", "key")
   """
-  @spec exists?(String.t(), String.t(), String.t(), String.t(), keyword()) :: boolean()
+  @spec exists?(String.t(), String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, boolean()} | {:error, term()}
   def exists?(project, instance, table, key, opts \\ []) do
-    case get(project, instance, table, key, opts) do
-      {:ok, nil} -> false
-      {:ok, _} -> true
-      {:error, _} -> false
-    end
-  end
-
-  # ============================================================================
-  # Atomic Operations
-  # ============================================================================
-
-  @doc """
-  Atomically increments a numeric cache value.
-
-  Uses BigTable's read-modify-write for atomicity.
-
-  ## Examples
-
-      {:ok, new_value} = MegasPinakas.Cache.increment(project, instance, "cache", "counter:views")
-  """
-  @spec increment(String.t(), String.t(), String.t(), String.t(), integer(), keyword()) ::
-          {:ok, integer()} | {:error, term()}
-  def increment(project, instance, table, key, amount \\ 1, opts \\ []) when is_integer(amount) do
-    family = Keyword.get(opts, :family, @default_family)
-    qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
-
-    MegasPinakas.Counter.increment(project, instance, table, key, family, qualifier, amount, opts)
-  end
-
-  @doc """
-  Atomically appends to a string cache value.
-
-  ## Examples
-
-      {:ok, new_value} = MegasPinakas.Cache.append(project, instance, "cache", "log:123", "new entry\n")
-  """
-  @spec append(String.t(), String.t(), String.t(), String.t(), binary(), keyword()) ::
-          {:ok, binary()} | {:error, term()}
-  def append(project, instance, table, key, value, opts \\ []) when is_binary(value) do
-    family = Keyword.get(opts, :family, @default_family)
-    qualifier = Keyword.get(opts, :qualifier, @default_qualifier)
-
-    rules = [MegasPinakas.append_rule(family, qualifier, value)]
-
-    case MegasPinakas.read_modify_write_row(project, instance, table, key, rules, opts) do
-      {:ok, response} ->
-        extract_value(response, family, qualifier)
-
-      {:error, reason} ->
-        {:error, reason}
+    case lookup(project, instance, table, key, opts) do
+      {:hit, _value} -> {:ok, true}
+      :miss -> {:ok, false}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -308,23 +287,89 @@ defmodule MegasPinakas.Cache do
   # Private Helpers
   # ============================================================================
 
-  defp extract_value(response, family, qualifier) do
-    case response.row do
-      nil ->
-        {:ok, nil}
+  defp column(opts) do
+    {Keyword.get(opts, :family, @default_family),
+     Keyword.get(opts, :qualifier, @default_qualifier)}
+  end
 
-      row ->
-        value = MegasPinakas.get_cell(row, family, qualifier)
-        {:ok, value}
+  # Only the cache column, latest version only: RMW-free writes still accumulate
+  # versions until GC runs, and we never want to transfer stale ones.
+  defp read_opts(family, qualifier, opts) do
+    filter =
+      Filter.chain_filters([
+        Filter.column_filter(family, qualifier),
+        Filter.cells_per_column_limit_filter(1)
+      ])
+
+    opts |> Keyword.take([:app_profile_id]) |> Keyword.put(:filter, filter)
+  end
+
+  defp envelope(value, opts) do
+    exp =
+      case Keyword.get(opts, :ttl) do
+        nil ->
+          nil
+
+        ttl when is_integer(ttl) and ttl > 0 ->
+          now() + ttl
+
+        other ->
+          raise ArgumentError,
+                ":ttl must be a positive integer number of seconds, got: #{inspect(other)}"
+      end
+
+    %{v: value, exp: exp}
+  end
+
+  defp now, do: System.system_time(:second)
+
+  defp decode_rows(rows, family, qualifier) do
+    now = now()
+
+    Enum.reduce_while(rows, {:ok, %{}}, fn row, {:ok, acc} ->
+      case decode_entry(MegasPinakas.get_cell(row, family, qualifier), now) do
+        {:ok, value} -> {:cont, {:ok, Map.put(acc, MegasPinakas.row_key(row), value)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # `{:hit, value}` for a live entry (including a stored nil), `:miss` for an
+  # absent or expired one. `get/5` collapses both nil cases; `get_or_put/6`
+  # must not.
+  defp lookup(project, instance, table, key, opts) do
+    {family, qualifier} = column(opts)
+
+    case MegasPinakas.read_row(project, instance, table, key, read_opts(family, qualifier, opts)) do
+      {:ok, row} -> classify(MegasPinakas.get_cell(row, family, qualifier), now())
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp decode_json_value(nil), do: nil
+  defp classify(nil, _now), do: :miss
 
-  defp decode_json_value(raw_value) do
-    case Types.decode(:json, raw_value) do
-      {:ok, v} -> v
-      {:error, _} -> nil
+  defp classify(raw, now) do
+    with {:ok, entry} <- unwrap(raw) do
+      if expired?(entry, now), do: :miss, else: {:hit, entry.v}
     end
   end
+
+  defp decode_entry(raw, now) do
+    case classify(raw, now) do
+      {:hit, value} -> {:ok, value}
+      :miss -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp unwrap(raw) do
+    case Types.decode(:term, raw) do
+      {:ok, %{v: _, exp: exp} = entry} when is_nil(exp) or is_integer(exp) -> {:ok, entry}
+      {:ok, _other} -> {:error, :invalid_cache_entry}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp expired?(%{exp: nil}, _now), do: false
+  defp expired?(%{exp: exp}, now), do: exp <= now
 end

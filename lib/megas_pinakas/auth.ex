@@ -1,3 +1,22 @@
+defmodule MegasPinakas.AuthError do
+  @moduledoc """
+  Raised by `MegasPinakas.Auth.request_opts/0` when no access token can be
+  obtained outside emulator mode.
+
+  `MegasPinakas.Client.execute/2` rescues this into
+  `{:error, {:auth_error, reason}}`, so callers of the public API never see the
+  exception; it exists so an operation closure fails *before* sending an
+  unauthenticated RPC rather than after a round-trip that Google rejects.
+  """
+
+  defexception [:reason]
+
+  @impl true
+  def message(%__MODULE__{reason: reason}) do
+    "BigTable authentication failed: #{inspect(reason)}"
+  end
+end
+
 defmodule MegasPinakas.Auth do
   @moduledoc """
   Authentication handling for BigTable gRPC requests.
@@ -14,6 +33,25 @@ defmodule MegasPinakas.Auth do
   lock-free ETS read on the hot path. This matters: an uncached fetch through
   the gcloud CLI fallback was measured at **911.9 ms**, paid once per RPC.
 
+  ## Failure behaviour
+
+  When no token can be obtained, `request_opts/0` raises
+  `MegasPinakas.AuthError`; `MegasPinakas.Client.execute/2` turns that into
+  `{:error, {:auth_error, reason}}`. The cache remembers the failure for a few
+  seconds so a broken token source is not re-invoked (and re-logged) on every
+  RPC.
+
+  ## Goth
+
+  Goth is an *optional* dependency. Add `{:goth, "~> 1.4"}` to your own deps
+  and point `:goth` at your Goth process:
+
+      config :megas_pinakas, :goth, MyApp.Goth
+
+  If `:goth` is configured but the library is not compiled in, token fetches
+  fail with `{:error, :goth_not_available}` rather than silently falling back
+  to the gcloud CLI.
+
   ## The gcloud CLI fallback
 
   `gcloud auth application-default print-access-token` spawns a subprocess and
@@ -22,10 +60,6 @@ defmodule MegasPinakas.Auth do
   explicitly if you must:
 
       config :megas_pinakas, :allow_gcloud_auth_fallback, true
-
-  For production, configure Goth instead:
-
-      config :megas_pinakas, :goth, MyApp.Goth
   """
 
   require Logger
@@ -45,31 +79,32 @@ defmodule MegasPinakas.Auth do
   # assume slightly less so a cached token is never served past its life.
   @gcloud_assumed_ttl_seconds 55 * 60
 
+  # A healthy gcloud call takes ~1 s. Anything past this is a hung subprocess
+  # (network, or gcloud waiting on a prompt we suppressed), not a slow one.
+  @gcloud_timeout 10_000
+
   @doc """
   Returns gRPC request options including authentication metadata.
 
   When running against the emulator, returns only `:timeout` (no auth required).
-  For production, attaches a cached OAuth token as gRPC metadata.
+  Otherwise attaches a cached OAuth token as gRPC metadata.
+
+  Raises `MegasPinakas.AuthError` when no token can be obtained. This is the
+  intended way for an operation closure to abort before the RPC is sent;
+  `MegasPinakas.Client.execute/2` converts it to `{:error, {:auth_error, reason}}`.
   """
   @spec request_opts() :: keyword()
   def request_opts do
     timeout = Config.default_timeout()
 
-    base_opts =
-      if Config.emulator?() do
-        []
-      else
-        case get_token() do
-          {:ok, token} ->
-            [metadata: %{"authorization" => token}]
-
-          {:error, reason} ->
-            Logger.warning("BigTable auth token fetch failed: #{inspect(reason)}")
-            []
-        end
+    if Config.emulator?() do
+      [timeout: timeout]
+    else
+      case get_token() do
+        {:ok, token} -> [metadata: %{"authorization" => token}, timeout: timeout]
+        {:error, reason} -> raise MegasPinakas.AuthError, reason: reason
       end
-
-    Keyword.put(base_opts, :timeout, timeout)
+    end
   end
 
   @doc """
@@ -93,7 +128,8 @@ defmodule MegasPinakas.Auth do
   Attempts, in order:
 
   1. `:token_source`, when configured (see below)
-  2. Goth (when `:goth` is configured and the library is available)
+  2. Goth (when `:goth` is configured; `{:error, :goth_not_available}` if the
+     library is not compiled in)
   3. gcloud CLI (non-production only)
 
   ## Custom token sources
@@ -153,7 +189,7 @@ defmodule MegasPinakas.Auth do
     if Code.ensure_loaded?(Goth) do
       fetch_goth_token(goth_name)
     else
-      gcloud_token()
+      {:error, :goth_not_available}
     end
   end
 
@@ -170,6 +206,11 @@ defmodule MegasPinakas.Auth do
           {:error, _} -> {:error, {:goth_error, reason}}
         end
     end
+  catch
+    # `Goth.fetch/1` is a GenServer.call; a misnamed or not-yet-started Goth
+    # process exits with `{:noproc, _}`. That must not take the token cache
+    # down with it.
+    :exit, reason -> {:error, {:goth_exit, reason}}
   end
 
   # Goth reports an absolute Unix expiry. Guard against a source that omits it
@@ -192,23 +233,52 @@ defmodule MegasPinakas.Auth do
     end
   end
 
+  # Runs under a Task so a hung gcloud cannot block the token cache forever.
+  # `gcloud_cmd/0` is total (never raises), so the linked task cannot crash the
+  # caller; `Task.shutdown/2` reaps it on timeout.
   defp run_gcloud do
-    case System.cmd("gcloud", ["auth", "application-default", "print-access-token"],
-           stderr_to_stdout: true
-         ) do
-      {token_output, 0} ->
-        token = String.trim(token_output)
-        {:ok, %{token: "Bearer #{token}", expires_at: now() + @gcloud_assumed_ttl_seconds}}
+    task = Task.async(&gcloud_cmd/0)
 
-      {error_output, _} ->
-        {:error, {:gcloud_error, String.trim(error_output)}}
+    case Task.yield(task, @gcloud_timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      {:exit, reason} -> {:error, {:gcloud_error, reason}}
+      nil -> {:error, :gcloud_timeout}
+    end
+  end
+
+  defp gcloud_cmd do
+    # stderr is left alone: gcloud prints update nags and warnings there, and
+    # merging them into stdout used to corrupt the token. Only the last
+    # non-empty stdout line is the token.
+    case System.cmd("gcloud", ["auth", "application-default", "print-access-token"],
+           env: [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}]
+         ) do
+      {output, 0} ->
+        case last_non_empty_line(output) do
+          nil ->
+            {:error, {:gcloud_error, :empty_output}}
+
+          token ->
+            {:ok, %{token: "Bearer #{token}", expires_at: now() + @gcloud_assumed_ttl_seconds}}
+        end
+
+      {_output, status} ->
+        {:error, {:gcloud_error, {:exit_status, status}}}
     end
   rescue
     e in ErlangError ->
       {:error, {:gcloud_not_found, Exception.message(e)}}
 
     e ->
-      {:error, {:auth_error, Exception.message(e)}}
+      {:error, {:gcloud_error, Exception.message(e)}}
+  end
+
+  defp last_non_empty_line(output) do
+    output
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> List.last()
   end
 
   defp now, do: Cache.now()

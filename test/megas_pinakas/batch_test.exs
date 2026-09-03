@@ -216,22 +216,43 @@ defmodule MegasPinakas.BatchTest do
     end
   end
 
-  describe "module exports" do
-    test "exports all expected functions" do
-      functions = Batch.__info__(:functions)
+  describe "chunk_entries/2" do
+    defp entry(key, n) do
+      %{row_key: key, mutations: List.duplicate(MegasPinakas.set_cell("cf", "c", "v"), n)}
+    end
 
-      assert {:new, 0} in functions
-      assert {:add, 2} in functions
-      assert {:add, 3} in functions
-      assert {:add_all, 2} in functions
-      assert {:write, 4} in functions
-      assert {:write, 5} in functions
-      assert {:to_entries, 1} in functions
-      assert {:size, 1} in functions
-      assert {:empty?, 1} in functions
-      assert {:mutation_count, 1} in functions
-      assert {:row_keys, 1} in functions
-      assert {:clear, 1} in functions
+    test "returns no chunks for no entries" do
+      assert Batch.chunk_entries([], 100) == []
+    end
+
+    test "keeps a batch within the limit as a single chunk" do
+      entries = [entry("a", 40), entry("b", 60)]
+
+      assert Batch.chunk_entries(entries, 100) == [entries]
+    end
+
+    test "starts a new chunk when the next entry would exceed the limit" do
+      a = entry("a", 60)
+      b = entry("b", 50)
+      c = entry("c", 50)
+
+      assert Batch.chunk_entries([a, b, c], 100) == [[a], [b, c]]
+    end
+
+    test "never splits a single entry, even one over the limit" do
+      small = entry("small", 1)
+      huge = entry("huge", 150)
+
+      assert Batch.chunk_entries([small, huge, small], 100) == [[small], [huge], [small]]
+    end
+
+    test "preserves insertion order across chunks" do
+      entries = for i <- 1..7, do: entry("k#{i}", 3)
+
+      chunks = Batch.chunk_entries(entries, 7)
+
+      assert Enum.map(chunks, &length/1) == [2, 2, 2, 1]
+      assert List.flatten(chunks) == entries
     end
   end
 end

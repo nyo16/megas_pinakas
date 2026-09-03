@@ -29,22 +29,17 @@ defmodule MegasPinakas.FilterTest do
       assert %RowFilter{filter: {:row_sample_filter, 0.5}} = filter
     end
 
-    test "accepts 0.0 probability" do
-      filter = Filter.row_sample_filter(0.0)
-
-      assert %RowFilter{filter: {:row_sample_filter, +0.0}} = filter
-    end
-
-    test "accepts 1.0 probability" do
-      filter = Filter.row_sample_filter(1.0)
-
-      assert %RowFilter{filter: {:row_sample_filter, 1.0}} = filter
-    end
-
     test "accepts small probabilities" do
       filter = Filter.row_sample_filter(0.001)
 
       assert %RowFilter{filter: {:row_sample_filter, 0.001}} = filter
+    end
+
+    # BigTable answers 0 and 1 with INVALID_ARGUMENT; refuse them client-side.
+    test "rejects probabilities outside the open interval (0, 1)" do
+      for p <- [0, 0.0, 1, 1.0, 1.5, -0.1, 2] do
+        assert_raise FunctionClauseError, fn -> Filter.row_sample_filter(p) end
+      end
     end
   end
 
@@ -170,6 +165,29 @@ defmodule MegasPinakas.FilterTest do
     end
   end
 
+  describe "column_range_filter/2 bound validation" do
+    test "raises when both start bounds are given" do
+      assert_raise ArgumentError, ~r/:start_qualifier_closed and :start_qualifier_open/, fn ->
+        Filter.column_range_filter("cf", start_qualifier_closed: "a", start_qualifier_open: "b")
+      end
+    end
+
+    test "raises when both end bounds are given" do
+      assert_raise ArgumentError, ~r/:end_qualifier_closed and :end_qualifier_open/, fn ->
+        Filter.column_range_filter("cf", end_qualifier_closed: "a", end_qualifier_open: "b")
+      end
+    end
+
+    test "still validates a mixed start/end pair from opposite sides" do
+      filter =
+        Filter.column_range_filter("cf", start_qualifier_open: "a", end_qualifier_closed: "z")
+
+      assert %RowFilter{filter: {:column_range_filter, range}} = filter
+      assert range.start_qualifier == {:start_qualifier_open, "a"}
+      assert range.end_qualifier == {:end_qualifier_closed, "z"}
+    end
+  end
+
   describe "timestamp_range_filter/2" do
     test "creates a timestamp range filter" do
       filter = Filter.timestamp_range_filter(1000, 2000)
@@ -189,6 +207,22 @@ defmodule MegasPinakas.FilterTest do
       assert %RowFilter{filter: {:timestamp_range_filter, range}} = filter
       assert range.start_timestamp_micros == hour_ago
       assert range.end_timestamp_micros == now
+    end
+
+    test "accepts 0 as the unbounded sentinel on either side" do
+      assert %RowFilter{
+               filter: {:timestamp_range_filter, %TimestampRange{end_timestamp_micros: 0}}
+             } =
+               Filter.timestamp_range_filter(1000, 0)
+
+      assert %RowFilter{
+               filter: {:timestamp_range_filter, %TimestampRange{start_timestamp_micros: 0}}
+             } =
+               Filter.timestamp_range_filter(0, 1000)
+    end
+
+    test "rejects negative timestamps" do
+      assert_raise FunctionClauseError, fn -> Filter.timestamp_range_filter(-1, 1000) end
     end
   end
 
@@ -239,6 +273,20 @@ defmodule MegasPinakas.FilterTest do
     end
   end
 
+  describe "value_range_filter/1 bound validation" do
+    test "raises when both start bounds are given" do
+      assert_raise ArgumentError, ~r/:start_value_closed and :start_value_open/, fn ->
+        Filter.value_range_filter(start_value_closed: "a", start_value_open: "b")
+      end
+    end
+
+    test "raises when both end bounds are given" do
+      assert_raise ArgumentError, ~r/:end_value_closed and :end_value_open/, fn ->
+        Filter.value_range_filter(end_value_closed: "a", end_value_open: "b")
+      end
+    end
+  end
+
   describe "value_regex_filter/1" do
     test "creates a value regex filter" do
       filter = Filter.value_regex_filter("error")
@@ -246,10 +294,10 @@ defmodule MegasPinakas.FilterTest do
       assert %RowFilter{filter: {:value_regex_filter, "error"}} = filter
     end
 
-    test "accepts complex regex patterns" do
-      filter = Filter.value_regex_filter("^[a-f0-9]{8}-[a-f0-9]{4}")
+    test "passes the pattern through untouched" do
+      filter = Filter.value_regex_filter("\\C*[a-f0-9]{8}-[a-f0-9]{4}")
 
-      assert %RowFilter{filter: {:value_regex_filter, "^[a-f0-9]{8}-[a-f0-9]{4}"}} = filter
+      assert %RowFilter{filter: {:value_regex_filter, "\\C*[a-f0-9]{8}-[a-f0-9]{4}"}} = filter
     end
   end
 
@@ -471,73 +519,23 @@ defmodule MegasPinakas.FilterTest do
   end
 
   describe "row_key_prefix_filter/1" do
-    test "creates a filter for row key prefix" do
+    test "escapes the prefix and appends the RE2 byte wildcard" do
       filter = Filter.row_key_prefix_filter("user#")
 
       assert %RowFilter{filter: {:row_key_regex_filter, regex}} = filter
-      assert regex == "^user\\#"
+      assert regex == "user\\#\\C*"
     end
 
-    test "escapes special characters" do
+    test "escapes special characters so they match literally" do
       filter = Filter.row_key_prefix_filter("test.prefix")
 
       assert %RowFilter{filter: {:row_key_regex_filter, regex}} = filter
-      assert regex == "^test\\.prefix"
+      assert regex == "test\\.prefix\\C*"
     end
-  end
 
-  # ============================================================================
-  # Module Exports
-  # ============================================================================
-
-  describe "module exports" do
-    test "exports all expected functions" do
-      functions = Filter.__info__(:functions)
-
-      # Row level filters
-      assert {:row_key_regex_filter, 1} in functions
-      assert {:row_sample_filter, 1} in functions
-
-      # Cell level filters
-      assert {:cells_per_row_limit_filter, 1} in functions
-      assert {:cells_per_row_offset_filter, 1} in functions
-      assert {:cells_per_column_limit_filter, 1} in functions
-      assert {:column_qualifier_regex_filter, 1} in functions
-
-      # Range filters
-      assert {:column_range_filter, 1} in functions
-      assert {:column_range_filter, 2} in functions
-      assert {:timestamp_range_filter, 2} in functions
-      assert {:value_range_filter, 0} in functions
-      assert {:value_range_filter, 1} in functions
-      assert {:value_regex_filter, 1} in functions
-
-      # Family and column filters
-      assert {:family_filter, 1} in functions
-      assert {:family_regex_filter, 1} in functions
-      assert {:column_filter, 2} in functions
-
-      # Modifying filters
-      assert {:strip_value_filter, 0} in functions
-      assert {:apply_label_filter, 1} in functions
-
-      # Pass/block filters
-      assert {:pass_all_filter, 0} in functions
-      assert {:block_all_filter, 0} in functions
-
-      # Composing filters
-      assert {:chain_filters, 1} in functions
-      assert {:interleave_filters, 1} in functions
-      assert {:condition_filter, 2} in functions
-      assert {:condition_filter, 3} in functions
-      assert {:sink_filter, 0} in functions
-
-      # Convenience builders
-      assert {:latest_only_filter, 0} in functions
-      assert {:column_latest_filter, 2} in functions
-      assert {:time_window_filter, 1} in functions
-      assert {:time_window_filter, 2} in functions
-      assert {:row_key_prefix_filter, 1} in functions
+    test "an empty prefix matches every key" do
+      assert %RowFilter{filter: {:row_key_regex_filter, "\\C*"}} =
+               Filter.row_key_prefix_filter("")
     end
   end
 end

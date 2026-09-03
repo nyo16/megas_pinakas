@@ -3,18 +3,23 @@ defmodule MegasPinakas.Types do
   Type-aware cell operations with automatic serialization/deserialization.
 
   Supports JSON, binary, integers, floats, booleans, timestamps, and Erlang terms.
-  All encoding formats are designed to be sortable where applicable (big-endian integers).
+  Integers are big-endian two's complement, so their encoded bytes sort in
+  numeric order for non-negative values only; negative values have the sign bit
+  set and sort after every non-negative one.
 
   ## Supported Types
 
   - `:binary` - Raw bytes, no encoding
   - `:string` - UTF-8 encoded string (same as binary but semantically different)
   - `:json` - Maps and lists encoded as JSON strings
-  - `:integer` - 64-bit signed big-endian integers (sortable)
+  - `:integer` - 64-bit signed big-endian integers; out-of-range values raise `ArgumentError`
   - `:float` - 64-bit IEEE 754 floats
   - `:boolean` - Single byte: <<1>> for true, <<0>> for false
   - `:datetime` - Microseconds since Unix epoch as 64-bit big-endian
-  - `:term` - Any Elixir term via `:erlang.term_to_binary/1`
+  - `:term` - Any Elixir term via `:erlang.term_to_binary/1`. Decoding uses the
+    `:safe` option, which refuses to allocate atoms, so a stored term whose atoms
+    are not already in this node's atom table decodes as
+    `{:error, :unsafe_or_invalid_term}` rather than silently creating them.
 
   ## Examples
 
@@ -40,8 +45,14 @@ defmodule MegasPinakas.Types do
   # Encoding/Decoding Helpers
   # ============================================================================
 
+  @int64_min -9_223_372_036_854_775_808
+  @int64_max 9_223_372_036_854_775_807
+
   @doc """
   Encodes a value to binary based on its type.
+
+  Raises `ArgumentError` when an `:integer` does not fit in a signed 64-bit
+  field; `<<value::signed-big-64>>` would otherwise truncate it silently.
 
   ## Examples
 
@@ -62,8 +73,15 @@ defmodule MegasPinakas.Types do
     Jason.encode!(value)
   end
 
-  def encode(:integer, value) when is_integer(value) do
+  def encode(:integer, value)
+      when is_integer(value) and value >= @int64_min and value <= @int64_max do
     <<value::signed-big-64>>
+  end
+
+  def encode(:integer, value) when is_integer(value) do
+    raise ArgumentError,
+          "integer #{value} does not fit in a signed 64-bit cell " <>
+            "(#{@int64_min}..#{@int64_max})"
   end
 
   def encode(:float, value) when is_float(value) do
@@ -131,7 +149,7 @@ defmodule MegasPinakas.Types do
   def decode(:term, value) when is_binary(value) do
     {:ok, :erlang.binary_to_term(value, [:safe])}
   rescue
-    ArgumentError -> {:error, :invalid_term_format}
+    ArgumentError -> {:error, :unsafe_or_invalid_term}
   end
 
   @doc """
@@ -568,7 +586,14 @@ defmodule MegasPinakas.Types do
   @doc """
   Reads multiple typed cells from a single row.
 
-  Returns a map with "family:qualifier" keys and decoded values.
+  Returns a map keyed `"family:qualifier"` with one entry per requested cell.
+  A cell that is absent — because the column is empty or the whole row does
+  not exist — maps to `nil`, so the result always has the same keys as `cells`
+  and callers can pattern-match on it without first checking the row exists.
+
+  A cell whose bytes do not decode as the requested type fails the whole call
+  with `{:error, {:decode, "family:qualifier", reason}}` instead of being
+  silently reported as missing.
 
   ## Examples
 
@@ -578,28 +603,20 @@ defmodule MegasPinakas.Types do
         {:json, "cf", "profile"}
       ])
       # => {:ok, %{"cf:name" => "John Doe", "cf:age" => 30, "cf:profile" => %{"city" => "NYC"}}}
+
+      # Missing row: same keys, nil values
+      {:ok, %{"cf:name" => nil, "cf:age" => nil}} =
+        MegasPinakas.Types.read_cells(project, instance, "users", "nope", [
+          {:string, "cf", "name"},
+          {:integer, "cf", "age"}
+        ])
   """
   @spec read_cells(String.t(), String.t(), String.t(), String.t(), list(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def read_cells(project, instance, table, row_key, cells, opts \\ []) when is_list(cells) do
     case MegasPinakas.read_row(project, instance, table, row_key, opts) do
-      {:ok, nil} ->
-        {:ok, %{}}
-
-      {:ok, row} ->
-        result =
-          cells
-          |> Enum.map(fn {type, family, qualifier} ->
-            key = "#{family}:#{qualifier}"
-            raw_value = MegasPinakas.get_cell(row, family, qualifier)
-            {key, decode_cell_value(type, raw_value)}
-          end)
-          |> Map.new()
-
-        {:ok, result}
-
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, row} -> decode_cells(row, cells)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -607,14 +624,21 @@ defmodule MegasPinakas.Types do
   # Private Helpers
   # ============================================================================
 
-  defp decode_cell_value(_type, nil), do: nil
+  # `row` may be nil (missing row); `get_cell/3` returns nil for that too, so
+  # both absent shapes collapse into the same keyed-nil result.
+  defp decode_cells(row, cells) do
+    Enum.reduce_while(cells, {:ok, %{}}, fn {type, family, qualifier}, {:ok, acc} ->
+      key = "#{family}:#{qualifier}"
 
-  defp decode_cell_value(type, raw_value) do
-    case decode(type, raw_value) do
-      {:ok, v} -> v
-      {:error, _} -> nil
-    end
+      case decode_cell(type, MegasPinakas.get_cell(row, family, qualifier)) do
+        {:ok, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+        {:error, reason} -> {:halt, {:error, {:decode, key, reason}}}
+      end
+    end)
   end
+
+  defp decode_cell(_type, nil), do: {:ok, nil}
+  defp decode_cell(type, raw_value), do: decode(type, raw_value)
 
   defp read_cell_as(project, instance, table, row_key, family, qualifier, type, opts) do
     case MegasPinakas.read_row(project, instance, table, row_key, opts) do

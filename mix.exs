@@ -1,14 +1,15 @@
 defmodule MegasPinakas.MixProject do
   use Mix.Project
 
-  @version "0.6.1"
+  @version "0.7.0"
   @source_url "https://github.com/nyo16/megas_pinakas"
 
   def project do
     [
       app: :megas_pinakas,
       version: @version,
-      elixir: "~> 1.15",
+      # googleapis 0.1.0 (transitive via grpc_core) requires ~> 1.18.
+      elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
@@ -17,6 +18,9 @@ defmodule MegasPinakas.MixProject do
       package: package(),
       docs: docs(),
       source_url: @source_url,
+      # Goth is optional; consumers without it must not see undefined-module
+      # warnings for the Goth.fetch/1 call in MegasPinakas.Auth.
+      elixirc_options: [no_warn_undefined: [Goth]],
       dialyzer: [
         plt_add_apps: [:mix],
         plt_file: {:no_warn, "priv/plts/dialyzer.plt"},
@@ -92,7 +96,7 @@ defmodule MegasPinakas.MixProject do
     [
       {:grpc_connection_pool, "~> 0.5.2"},
       {:googleapis_proto_ex, "~> 0.4"},
-      {:goth, "~> 1.4"},
+      {:goth, "~> 1.4", optional: true},
       {:benchee, "~> 1.3", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false},

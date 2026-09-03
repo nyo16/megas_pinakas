@@ -1,6 +1,8 @@
 defmodule MegasPinakas.TypesTest do
   use ExUnit.Case, async: true
 
+  import Bitwise, only: [<<<: 2]
+
   alias Google.Bigtable.V2.Mutation
   alias MegasPinakas.Types
 
@@ -190,8 +192,17 @@ defmodule MegasPinakas.TypesTest do
       assert Types.decode(:term, encoded) == {:ok, term}
     end
 
-    test "returns error for invalid term" do
-      assert Types.decode(:term, "not a valid term binary") == {:error, :invalid_term_format}
+    test "returns error for a binary that is not a term" do
+      assert Types.decode(:term, "not a valid term binary") == {:error, :unsafe_or_invalid_term}
+    end
+
+    test "refuses to create atoms that do not already exist" do
+      # Hand-build SMALL_ATOM_UTF8_EXT for a name never spelled as a literal, so
+      # the atom cannot already be in this node's table.
+      name = "megas_pinakas_unseen_atom_#{System.unique_integer([:positive])}"
+      unseen = <<131, 119, byte_size(name), name::binary>>
+
+      assert Types.decode(:term, unseen) == {:error, :unsafe_or_invalid_term}
     end
   end
 
@@ -298,10 +309,33 @@ defmodule MegasPinakas.TypesTest do
 
   describe "roundtrip encoding" do
     test "integer roundtrip preserves value" do
-      for val <- [-1_000_000, -1, 0, 1, 1_000_000, 9_223_372_036_854_775_807] do
+      for val <- [-1_000_000, -1, 0, 1, 1_000_000] do
         encoded = Types.encode(:integer, val)
         assert {:ok, ^val} = Types.decode(:integer, encoded)
       end
+    end
+
+    test "integer roundtrip at the signed 64-bit boundaries" do
+      min = -9_223_372_036_854_775_808
+      max = 9_223_372_036_854_775_807
+
+      assert Types.encode(:integer, min) == <<0x80, 0, 0, 0, 0, 0, 0, 0>>
+      assert Types.encode(:integer, max) == <<0x7F, 255, 255, 255, 255, 255, 255, 255>>
+      assert Types.decode(:integer, Types.encode(:integer, min)) == {:ok, min}
+      assert Types.decode(:integer, Types.encode(:integer, max)) == {:ok, max}
+    end
+
+    test "integer overflow raises instead of silently truncating" do
+      # <<v::signed-big-64>> would wrap 2^63 to -2^63 without complaint.
+      assert_raise ArgumentError, ~r/9223372036854775808 does not fit/, fn ->
+        Types.encode(:integer, 9_223_372_036_854_775_808)
+      end
+
+      assert_raise ArgumentError, ~r/-9223372036854775809 does not fit/, fn ->
+        Types.encode(:integer, -9_223_372_036_854_775_809)
+      end
+
+      assert_raise ArgumentError, fn -> Types.set_integer("cf", "n", 1 <<< 64) end
     end
 
     test "float roundtrip preserves value" do
@@ -366,107 +400,21 @@ defmodule MegasPinakas.TypesTest do
   end
 
   describe "integer sortability" do
-    test "encoded integers maintain sort order for positive numbers" do
-      values = [0, 1, 100, 1000, 1_000_000]
+    test "encoded integers maintain sort order for non-negative numbers" do
+      values = [0, 1, 100, 1000, 1_000_000, 9_223_372_036_854_775_807]
       encoded = Enum.map(values, &Types.encode(:integer, &1))
 
-      # Verify they sort in the same order
-      sorted_encoded = Enum.sort(encoded)
-      assert sorted_encoded == encoded
+      assert Enum.sort(encoded) == encoded
     end
 
-    test "encoded integers maintain sort order across negative and positive" do
-      values = [-1000, -1, 0, 1, 1000]
-      encoded = Enum.map(values, &Types.encode(:integer, &1))
+    test "negative integers sort after every non-negative one (two's complement sign bit)" do
+      # This is the documented limitation: the encoding is not order-preserving
+      # across zero, so callers who need that must offset their values.
+      negative = Types.encode(:integer, -1)
+      positive = Types.encode(:integer, 9_223_372_036_854_775_807)
 
-      # For signed integers in big-endian, negative numbers have MSB set
-      # so they'll sort AFTER positive numbers in lexicographic order
-      # This is a known limitation of signed integer encoding for sorting
-      # For truly sortable integers, you'd need offset binary encoding
-
-      # Just verify the encoding is consistent
-      for {val, enc} <- Enum.zip(values, encoded) do
-        {:ok, decoded} = Types.decode(:integer, enc)
-        assert decoded == val
-      end
-    end
-  end
-
-  describe "module exports" do
-    test "exports all encoding functions" do
-      functions = Types.__info__(:functions)
-
-      assert {:encode, 2} in functions
-      assert {:decode, 2} in functions
-      assert {:decode!, 2} in functions
-    end
-
-    test "exports all mutation builders" do
-      functions = Types.__info__(:functions)
-
-      assert {:set_json, 3} in functions
-      assert {:set_json, 4} in functions
-      assert {:set_integer, 3} in functions
-      assert {:set_integer, 4} in functions
-      assert {:set_float, 3} in functions
-      assert {:set_float, 4} in functions
-      assert {:set_boolean, 3} in functions
-      assert {:set_boolean, 4} in functions
-      assert {:set_datetime, 3} in functions
-      assert {:set_datetime, 4} in functions
-      assert {:set_term, 3} in functions
-      assert {:set_term, 4} in functions
-    end
-
-    test "exports all write functions" do
-      functions = Types.__info__(:functions)
-
-      assert {:write_binary, 7} in functions
-      assert {:write_binary, 8} in functions
-      assert {:write_string, 7} in functions
-      assert {:write_string, 8} in functions
-      assert {:write_json, 7} in functions
-      assert {:write_json, 8} in functions
-      assert {:write_integer, 7} in functions
-      assert {:write_integer, 8} in functions
-      assert {:write_float, 7} in functions
-      assert {:write_float, 8} in functions
-      assert {:write_boolean, 7} in functions
-      assert {:write_boolean, 8} in functions
-      assert {:write_datetime, 7} in functions
-      assert {:write_datetime, 8} in functions
-      assert {:write_term, 7} in functions
-      assert {:write_term, 8} in functions
-    end
-
-    test "exports all read functions" do
-      functions = Types.__info__(:functions)
-
-      assert {:read_binary, 6} in functions
-      assert {:read_binary, 7} in functions
-      assert {:read_string, 6} in functions
-      assert {:read_string, 7} in functions
-      assert {:read_json, 6} in functions
-      assert {:read_json, 7} in functions
-      assert {:read_integer, 6} in functions
-      assert {:read_integer, 7} in functions
-      assert {:read_float, 6} in functions
-      assert {:read_float, 7} in functions
-      assert {:read_boolean, 6} in functions
-      assert {:read_boolean, 7} in functions
-      assert {:read_datetime, 6} in functions
-      assert {:read_datetime, 7} in functions
-      assert {:read_term, 6} in functions
-      assert {:read_term, 7} in functions
-    end
-
-    test "exports batch operations" do
-      functions = Types.__info__(:functions)
-
-      assert {:write_cells, 5} in functions
-      assert {:write_cells, 6} in functions
-      assert {:read_cells, 5} in functions
-      assert {:read_cells, 6} in functions
+      assert negative > positive
+      assert Types.decode(:integer, negative) == {:ok, -1}
     end
   end
 end

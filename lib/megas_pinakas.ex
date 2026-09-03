@@ -56,7 +56,8 @@ defmodule MegasPinakas do
   they are bounded by the keys or window you pass in, so keep those bounded.
   """
 
-  alias MegasPinakas.{Auth, Client, Config, Filter, RowAssembler}
+  alias MegasPinakas.{Auth, Client, Config, Filter, Response, RowAssembler}
+  alias MegasPinakas.Row, as: RowBuilder
 
   # Aliases for protobuf modules
   alias Google.Bigtable.V2.{
@@ -107,11 +108,13 @@ defmodule MegasPinakas do
 
     * `:rows` - A `RowSet` specifying which rows to read
     * `:filter` - A `RowFilter` to apply
-    * `:rows_limit` - Maximum number of rows to return
+    * `:rows_limit` - Maximum number of rows to return; a non-negative integer,
+      where `0` (the default) means no limit
     * `:max_rows` - Safety cap (default `:infinity`). When the result would exceed
       it, returns `{:error, :result_too_large}` instead of a list. Implemented by
       asking the server for at most `max_rows + 1` rows, so exceeding the cap
-      costs one extra row, not a full scan.
+      costs one extra row, not a full scan. Must be `:infinity` or a positive
+      integer; anything else raises `ArgumentError`.
     * `:app_profile_id` - App profile to use
 
   ## Examples
@@ -136,7 +139,8 @@ defmodule MegasPinakas do
   @spec read_rows(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, [Row.t()]} | {:error, term()}
   def read_rows(project_id, instance_id, table_id, opts \\ []) do
-    max_rows = Keyword.get(opts, :max_rows, :infinity)
+    max_rows = validate_max_rows!(Keyword.get(opts, :max_rows, :infinity))
+    rows_limit = validate_rows_limit!(Keyword.get(opts, :rows_limit, 0))
 
     operation = fn channel ->
       request = %ReadRowsRequest{
@@ -144,7 +148,7 @@ defmodule MegasPinakas do
         app_profile_id: Keyword.get(opts, :app_profile_id, ""),
         rows: Keyword.get(opts, :rows),
         filter: Keyword.get(opts, :filter),
-        rows_limit: effective_rows_limit(Keyword.get(opts, :rows_limit, 0), max_rows),
+        rows_limit: effective_rows_limit(rows_limit, max_rows),
         request_stats_view: :REQUEST_STATS_VIEW_UNSPECIFIED
       }
 
@@ -166,13 +170,29 @@ defmodule MegasPinakas do
     Client.execute(operation)
   end
 
+  # Both options are validated here, before the closure is built, so a bad
+  # value raises at the call site rather than inside Client.execute/2 where it
+  # would be rescued into an `{:error, _}` and emit a bogus :exception event.
+  defp validate_max_rows!(:infinity), do: :infinity
+  defp validate_max_rows!(n) when is_integer(n) and n > 0, do: n
+
+  defp validate_max_rows!(other) do
+    raise ArgumentError,
+          ":max_rows must be :infinity or a positive integer, got: #{inspect(other)}"
+  end
+
+  defp validate_rows_limit!(n) when is_integer(n) and n >= 0, do: n
+
+  defp validate_rows_limit!(other) do
+    raise ArgumentError, ":rows_limit must be a non-negative integer, got: #{inspect(other)}"
+  end
+
   # Asks the server for one row beyond the cap. That extra row is what makes the
   # overflow detectable, and asking for it is what keeps the cap cheap — the
   # server stops there instead of streaming a whole table we would then discard.
   defp effective_rows_limit(rows_limit, :infinity), do: rows_limit
 
-  defp effective_rows_limit(rows_limit, max_rows)
-       when is_integer(max_rows) and max_rows > 0 do
+  defp effective_rows_limit(rows_limit, max_rows) do
     # A `:rows_limit` of 0 means "no limit" in the ReadRows proto.
     if rows_limit > 0, do: min(rows_limit, max_rows + 1), else: max_rows + 1
   end
@@ -314,6 +334,12 @@ defmodule MegasPinakas do
         failed -> {:error, Enum.map(failed, &{&1.index, &1.status.message})}
       end
 
+  ## Entries
+
+  Each entry is a `MegasPinakas.Row` or a map with `row_key` and `mutations`
+  keys (atom or string). Entries are validated before any RPC is made; a
+  malformed entry raises `ArgumentError`.
+
   ## Options
 
     * `:app_profile_id` - App profile to use
@@ -322,7 +348,7 @@ defmodule MegasPinakas do
 
       entries = [
         %{row_key: "row1", mutations: [MegasPinakas.set_cell("cf", "col", "val1")]},
-        %{row_key: "row2", mutations: [MegasPinakas.set_cell("cf", "col", "val2")]}
+        MegasPinakas.Row.new("row2") |> MegasPinakas.Row.put_string("cf", "col", "val2")
       ]
       {:ok, results} = MegasPinakas.mutate_rows("project", "instance", "table", entries)
 
@@ -333,18 +359,12 @@ defmodule MegasPinakas do
   > silently discarded every per-entry failure. It now returns the list it always
   > claimed to.
   """
-  @spec mutate_rows(String.t(), String.t(), String.t(), [map()], keyword()) ::
+  @spec mutate_rows(String.t(), String.t(), String.t(), [map() | RowBuilder.t()], keyword()) ::
           {:ok, [MutateRowsResponse.Entry.t()]} | {:error, term()}
-  def mutate_rows(project_id, instance_id, table_id, entries, opts \\ []) do
-    operation = fn channel ->
-      request_entries =
-        Enum.map(entries, fn entry ->
-          %MutateRowsRequest.Entry{
-            row_key: entry[:row_key] || entry["row_key"],
-            mutations: entry[:mutations] || entry["mutations"]
-          }
-        end)
+  def mutate_rows(project_id, instance_id, table_id, entries, opts \\ []) when is_list(entries) do
+    request_entries = Enum.map(entries, &to_request_entry!/1)
 
+    operation = fn channel ->
       request = %MutateRowsRequest{
         table_name: Config.table_path(project_id, instance_id, table_id),
         app_profile_id: Keyword.get(opts, :app_profile_id, ""),
@@ -360,6 +380,30 @@ defmodule MegasPinakas do
     end
 
     Client.execute(operation)
+  end
+
+  # Runs outside the operation closure so a bad entry raises at the call site
+  # instead of surfacing as a rescued `{:error, _}` from Client.execute/2.
+  defp to_request_entry!(%RowBuilder{} = row) do
+    row |> RowBuilder.to_entry() |> to_request_entry!()
+  end
+
+  defp to_request_entry!(%{} = entry) do
+    row_key = Map.get(entry, :row_key, Map.get(entry, "row_key"))
+    mutations = Map.get(entry, :mutations, Map.get(entry, "mutations"))
+
+    if is_binary(row_key) and is_list(mutations) do
+      %MutateRowsRequest.Entry{row_key: row_key, mutations: mutations}
+    else
+      raise ArgumentError,
+            "mutate_rows entry must have a binary :row_key and a list of :mutations, " <>
+              "got: #{inspect(entry)}"
+    end
+  end
+
+  defp to_request_entry!(other) do
+    raise ArgumentError,
+          "mutate_rows entry must be a %MegasPinakas.Row{} or a map, got: #{inspect(other)}"
   end
 
   @doc """
@@ -402,7 +446,8 @@ defmodule MegasPinakas do
         true_mutations,
         false_mutations,
         opts \\ []
-      ) do
+      )
+      when is_binary(row_key) and is_list(true_mutations) and is_list(false_mutations) do
     operation = fn channel ->
       request = %CheckAndMutateRowRequest{
         table_name: Config.table_path(project_id, instance_id, table_id),
@@ -447,7 +492,8 @@ defmodule MegasPinakas do
           [ReadModifyWriteRule.t()],
           keyword()
         ) :: {:ok, ReadModifyWriteRowResponse.t()} | {:error, term()}
-  def read_modify_write_row(project_id, instance_id, table_id, row_key, rules, opts \\ []) do
+  def read_modify_write_row(project_id, instance_id, table_id, row_key, rules, opts \\ [])
+      when is_binary(row_key) and is_list(rules) do
     operation = fn channel ->
       request = %ReadModifyWriteRowRequest{
         table_name: Config.table_path(project_id, instance_id, table_id),
@@ -472,16 +518,20 @@ defmodule MegasPinakas do
 
   ## Options
 
-    * `:timestamp_micros` - Timestamp in microseconds. Defaults to -1 (server-assigned).
+    * `:timestamp_micros` - Cell timestamp in microseconds. Defaults to `-1`,
+      which lets the server assign the current time. BigTable tables store
+      timestamps at millisecond granularity, so an explicit value must be a
+      multiple of `1_000`; anything else is rejected by the server on write,
+      so it raises `ArgumentError` here instead.
 
   ## Examples
 
       MegasPinakas.set_cell("column_family", "column_qualifier", "value")
-      MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 1234567890000)
+      MegasPinakas.set_cell("cf", "col", "value", timestamp_micros: 1_234_567_890_000)
   """
   @spec set_cell(String.t(), binary(), binary(), keyword()) :: Mutation.t()
   def set_cell(family_name, column_qualifier, value, opts \\ []) do
-    timestamp = Keyword.get(opts, :timestamp_micros, -1)
+    timestamp = validate_timestamp_micros!(Keyword.get(opts, :timestamp_micros, -1))
 
     %Mutation{
       mutation:
@@ -493,6 +543,17 @@ defmodule MegasPinakas do
            value: value
          }}
     }
+  end
+
+  defp validate_timestamp_micros!(-1), do: -1
+
+  defp validate_timestamp_micros!(ts) when is_integer(ts) and ts >= 0 and rem(ts, 1000) == 0,
+    do: ts
+
+  defp validate_timestamp_micros!(other) do
+    raise ArgumentError,
+          ":timestamp_micros must be -1 or a non-negative multiple of 1000 " <>
+            "(millisecond granularity), got: #{inspect(other)}"
   end
 
   @doc """
@@ -641,21 +702,28 @@ defmodule MegasPinakas do
   end
 
   @doc """
-  Creates a row range with prefix matching.
+  Creates a row range covering every key that starts with `prefix`.
+
+  The end bound is the prefix with its last non-`0xFF` byte incremented. A
+  prefix made entirely of `0xFF` bytes has no such successor, so the range is
+  left open-ended (`end_key: nil`) rather than given an empty end key, which
+  BigTable would read as "before every key" and return nothing. An empty
+  prefix is the whole table.
 
   ## Examples
 
       MegasPinakas.row_range_prefix("user#")
+      # => %RowRange{start_key: {:start_key_closed, "user#"}, end_key: {:end_key_open, "user$"}}
   """
   @spec row_range_prefix(binary()) :: RowRange.t()
-  def row_range_prefix(prefix) do
-    # Calculate the end key by incrementing the last byte
-    end_key = calculate_prefix_end(prefix)
+  def row_range_prefix(prefix) when is_binary(prefix) do
+    end_key =
+      case calculate_prefix_end(prefix) do
+        nil -> nil
+        key -> {:end_key_open, key}
+      end
 
-    %RowRange{
-      start_key: {:start_key_closed, prefix},
-      end_key: {:end_key_open, end_key}
-    }
+    %RowRange{start_key: {:start_key_closed, prefix}, end_key: end_key}
   end
 
   @doc """
@@ -854,7 +922,7 @@ defmodule MegasPinakas do
 
       {:error, reason}, _acc ->
         Logger.warning("BigTable response stream error: #{inspect(reason)}")
-        {:halt, {:error, {:incomplete_read, reason}}}
+        {:halt, {:error, {:incomplete_read, Response.normalize_reason(reason)}}}
 
       unexpected, _acc ->
         Logger.warning("BigTable unexpected stream element: #{inspect(unexpected)}")
@@ -878,12 +946,11 @@ defmodule MegasPinakas do
     end
   end
 
-  # Calculates the exclusive end key for a prefix scan.
-  # Returns <<>> (empty binary) when all bytes are 0xFF, meaning "no upper bound"
-  # — the scan should read to the end of the table.
-  defp calculate_prefix_end(prefix) when byte_size(prefix) == 0 do
-    <<>>
-  end
+  # Calculates the exclusive end key for a prefix scan by incrementing the last
+  # byte that is not 0xFF, dropping any trailing 0xFF bytes. Returns `nil` when
+  # every byte is 0xFF (or the prefix is empty): there is no key greater than
+  # such a prefix, so the range must run to the end of the table.
+  defp calculate_prefix_end(<<>>), do: nil
 
   defp calculate_prefix_end(prefix) do
     prefix_size = byte_size(prefix) - 1

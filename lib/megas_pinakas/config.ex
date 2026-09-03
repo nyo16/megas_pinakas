@@ -7,6 +7,7 @@ defmodule MegasPinakas.Config do
   @default_emulator_host "localhost"
   @default_emulator_port 8086
   @production_host "bigtable.googleapis.com"
+  @admin_host "bigtableadmin.googleapis.com"
   @production_port 443
   @default_timeout 30_000
 
@@ -107,10 +108,15 @@ defmodule MegasPinakas.Config do
 
   @doc """
   Returns true if running against the BigTable emulator.
+
+  True when an emulator endpoint is configured (`:emulator` app config or
+  `BIGTABLE_EMULATOR_HOST`), or when the Data API pool is configured under the
+  `GrpcConnectionPool` key with a `type: :local` endpoint — a plaintext local
+  endpoint is an emulator by definition, and must not receive auth metadata.
   """
   @spec emulator?() :: boolean()
   def emulator? do
-    emulator_config() != nil or System.get_env("BIGTABLE_EMULATOR_HOST") != nil
+    emulator_endpoint() != nil or configured_local_endpoint() != nil
   end
 
   @doc """
@@ -123,8 +129,19 @@ defmodule MegasPinakas.Config do
 
   @doc """
   Returns the emulator host and port from config or environment variable.
+
+  `BIGTABLE_EMULATOR_HOST` takes precedence over the `:emulator` app config and
+  is parsed as `host`, `host:port`, `[ipv6]`, or `[ipv6]:port`; a missing port
+  defaults to #{@default_emulator_port}. Raises `ArgumentError` when the value
+  cannot be parsed, so a typo fails at boot rather than as a connection error.
+
+  ## Examples
+
+      BIGTABLE_EMULATOR_HOST=localhost:8086  # => {"localhost", 8086}
+      BIGTABLE_EMULATOR_HOST=emulator        # => {"emulator", 8086}
+      BIGTABLE_EMULATOR_HOST=[::1]:9000      # => {"::1", 9000}
   """
-  @spec emulator_endpoint() :: {String.t(), integer()} | nil
+  @spec emulator_endpoint() :: {String.t(), :inet.port_number()} | nil
   def emulator_endpoint do
     case System.get_env("BIGTABLE_EMULATOR_HOST") do
       nil ->
@@ -138,56 +155,138 @@ defmodule MegasPinakas.Config do
             {host, port}
         end
 
-      env_host ->
-        case String.split(env_host, ":") do
-          [host, port_str] ->
-            {host, String.to_integer(port_str)}
+      value ->
+        parse_host_port!(value)
+    end
+  end
 
-          [host] ->
-            {host, @default_emulator_port}
-        end
+  defp parse_host_port!(value) do
+    case split_host_port(value) do
+      {"", _port} ->
+        raise ArgumentError, "BIGTABLE_EMULATOR_HOST has an empty host: #{inspect(value)}"
+
+      {host, nil} ->
+        {host, @default_emulator_port}
+
+      {host, port} ->
+        {host, parse_port!(value, port)}
+    end
+  end
+
+  # `[::1]:8086` — bracketed IPv6 literal with optional port.
+  defp split_host_port("[" <> rest) do
+    case String.split(rest, "]", parts: 2) do
+      [host, ""] -> {host, nil}
+      [host, ":" <> port] -> {host, port}
+      _ -> raise ArgumentError, "BIGTABLE_EMULATOR_HOST is malformed: #{inspect("[" <> rest)}"
+    end
+  end
+
+  defp split_host_port(value) do
+    case String.split(value, ":") do
+      [host] ->
+        {host, nil}
+
+      [host, port] ->
+        {host, port}
+
+      _ ->
+        # A bare IPv6 literal is ambiguous with `host:port`; require brackets.
+        raise ArgumentError,
+              "BIGTABLE_EMULATOR_HOST #{inspect(value)} has more than one ':'; " <>
+                "write IPv6 literals as [addr]:port"
+    end
+  end
+
+  defp parse_port!(value, port) do
+    case Integer.parse(port) do
+      {n, ""} when n in 1..65_535 ->
+        n
+
+      _ ->
+        raise ArgumentError,
+              "BIGTABLE_EMULATOR_HOST #{inspect(value)} has an invalid port #{inspect(port)}"
+    end
+  end
+
+  # Host/port of the Data API pool when it is configured under the
+  # `GrpcConnectionPool` key with a `type: :local` endpoint; nil otherwise.
+  # Used to keep `emulator?/0` and the admin pool consistent with that pool.
+  defp configured_local_endpoint do
+    with config when is_list(config) <- Application.get_env(:megas_pinakas, GrpcConnectionPool),
+         endpoint when is_list(endpoint) <- Keyword.get(config, :endpoint),
+         :local <- Keyword.get(endpoint, :type) do
+      {Keyword.get(endpoint, :host), Keyword.get(endpoint, :port)}
+    else
+      _ -> nil
     end
   end
 
   # Connection Pool Configuration
 
   @doc """
-  Builds the connection pool configuration based on environment.
-  """
-  @spec build_pool_config() :: map()
-  def build_pool_config do
-    case GrpcConnectionPool.Config.from_env(:megas_pinakas) do
-      {:ok, config} ->
-        config
+  Builds the Data API connection pool configuration based on environment.
 
-      {:error, _} ->
-        build_legacy_config()
+  When `config :megas_pinakas, GrpcConnectionPool, ...` is present it is used
+  verbatim (see `GrpcConnectionPool.Config.from_env/2`), except that the pool
+  name is always `MegasPinakas.ConnectionPool`: `MegasPinakas.Client` looks the
+  pool up by that name, so a custom `pool.name` would start a pool nothing can
+  find. Otherwise the pool is derived from `emulator_endpoint/0`, falling back
+  to the production Data API host.
+
+  Raises `ArgumentError` when the `GrpcConnectionPool` config is present but
+  invalid; a misconfigured pool must not silently degrade to the defaults.
+  """
+  @spec build_pool_config() :: GrpcConnectionPool.Config.t()
+  def build_pool_config do
+    if Application.get_env(:megas_pinakas, GrpcConnectionPool) == nil do
+      build_endpoint_config(@production_host, MegasPinakas.ConnectionPool)
+    else
+      case GrpcConnectionPool.Config.from_env(:megas_pinakas) do
+        {:ok, %{pool: pool} = config} ->
+          %{config | pool: %{pool | name: MegasPinakas.ConnectionPool}}
+
+        {:error, message} ->
+          raise ArgumentError, "invalid :megas_pinakas GrpcConnectionPool config: #{message}"
+      end
     end
   end
 
-  defp build_legacy_config do
+  @doc """
+  Builds the Admin API connection pool configuration.
+
+  Google serves `BigtableTableAdmin` and `BigtableInstanceAdmin` from
+  `#{@admin_host}`, not from the Data API host; the data host answers
+  admin RPCs with `UNIMPLEMENTED`. The emulator serves both on one port, so in
+  emulator mode (including a `type: :local` `GrpcConnectionPool` endpoint) this
+  is the same endpoint as `build_pool_config/0`.
+  """
+  @spec build_admin_pool_config() :: GrpcConnectionPool.Config.t()
+  def build_admin_pool_config do
+    build_endpoint_config(@admin_host, MegasPinakas.AdminConnectionPool)
+  end
+
+  defp build_endpoint_config(production_host, pool_name) do
     pool_size = Application.get_env(:megas_pinakas, :default_pool_size, @default_pool_size)
 
-    case emulator_endpoint() do
+    case emulator_endpoint() || configured_local_endpoint() do
       nil ->
-        # Production Google Cloud BigTable
         {:ok, config} =
           GrpcConnectionPool.Config.production(
-            host: @production_host,
+            host: production_host,
             port: @production_port,
-            pool_name: MegasPinakas.ConnectionPool,
+            pool_name: pool_name,
             pool_size: pool_size
           )
 
         config
 
       {host, port} ->
-        # Local emulator
         {:ok, config} =
           GrpcConnectionPool.Config.local(
             host: host,
             port: port,
-            pool_name: MegasPinakas.ConnectionPool,
+            pool_name: pool_name,
             pool_size: pool_size
           )
 
@@ -204,11 +303,19 @@ defmodule MegasPinakas.Config do
   end
 
   @doc """
-  Returns the production BigTable endpoint.
+  Returns the production Data API endpoint.
   """
   @spec production_endpoint() :: {String.t(), integer()}
   def production_endpoint do
     {@production_host, @production_port}
+  end
+
+  @doc """
+  Returns the production Admin API endpoint.
+  """
+  @spec admin_endpoint() :: {String.t(), integer()}
+  def admin_endpoint do
+    {@admin_host, @production_port}
   end
 
   @doc """
